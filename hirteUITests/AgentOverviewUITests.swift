@@ -61,6 +61,42 @@ final class AgentOverviewUITests: XCTestCase {
     }
 
     @MainActor
+    func testSelectedSidebarRows() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "dark"
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+                                "-appearance", appearance, "-hirte.demo", "YES"]
+        app.launch()
+        let agents = app.buttons["Agents"]
+        XCTAssertTrue(agents.waitForExistence(timeout: 10))
+        agents.tap()
+        let agent = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
+        XCTAssertTrue(agent.waitForExistence(timeout: 5))
+        agent.tap()
+        let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        XCTAssertTrue(agent.isHittable, "The selected row remains visible beside the terminal")
+        shot("selected-agent-" + appearance)
+        openMenu(app)
+        app.buttons["Nested"].tap()
+        let children = app.buttons["children-t1"]
+        XCTAssertTrue(children.waitForExistence(timeout: 5))
+        XCTAssertTrue(children.isHittable)
+        shot("selected-nested-agent-" + appearance)
+        children.tap()
+        children.tap()
+        app.buttons["Terminals"].tap()
+        let terminal = app.descendants(matching: .any).matching(identifier: "t5").firstMatch
+        XCTAssertTrue(terminal.waitForExistence(timeout: 5))
+        terminal.tap()
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        XCTAssertTrue(terminal.isHittable)
+        shot("selected-terminal-" + appearance)
+    }
+
+    @MainActor
     private func openMenu(_ app: XCUIApplication) {
         let menu = app.buttons["agent-overview-menu"]
         if !menu.exists {

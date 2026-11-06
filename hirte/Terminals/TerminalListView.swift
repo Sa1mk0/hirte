@@ -429,6 +429,8 @@ struct TerminalListView: View {
             }
         }
         .listStyle(.sidebar)
+        // Sidebar selection uses white labels; the app accent becomes nearly white in dark mode.
+        .tint(Color(red: 48 / 255, green: 52 / 255, blue: 56 / 255))
         .animation(.default, value: session.terminals.map(\.address))
     }
 }

@@ -46,7 +46,7 @@ struct AgentOverviewRowView: View {
                     } label: {
                         Label("\(childCount) \(childCount == 1 ? "child" : "children")",
                               systemImage: expanded.wrappedValue ? "chevron.down" : "chevron.right")
-                            .font(.caption)
+                            .font(.caption).foregroundStyle(.primary)
                     }
                     .buttonStyle(.borderless)
                     .accessibilityLabel("\(expanded.wrappedValue ? "Collapse" : "Expand") children of \(AgentOverview.title(terminal))")
@@ -67,6 +67,7 @@ struct AgentOverviewRowView: View {
                 .padding(.vertical, 4).contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
+            .foregroundStyle(.primary)
             .accessibilityLabel(state.title)
             .popover(isPresented: $explaining) {
                 VStack(alignment: .leading, spacing: 4) {
