@@ -47,6 +47,39 @@ final class TerminalCanvasView: UIView, UIKeyInput {
     private var fonts = Fonts(size: 13)
     /// Smaller fonts for when another viewer's larger size must fit; rebuilt only when the scale changes.
     private var scaledFonts: Fonts?
+    // Text only: selection, backgrounds and cursor remain live overlays. Content keys let
+    // unchanged rows survive scrolling even though Ghostty conservatively dirties every row.
+    private struct TextRow {
+        var image: UIImage
+        var bytes: Int
+        var used: UInt64
+    }
+    private var textRows: [TextRowKey: TextRow] = [:]
+    private(set) var textRowBytes = 0
+    private var textRowUse: UInt64 = 0
+    private var textRowConfiguration: TextRowConfiguration?
+
+    private struct TextRowConfiguration: Equatable {
+        var size: CGFloat
+        var family: TerminalFont
+        var scale: CGFloat
+        var foreground: RGB
+        var background: RGB
+    }
+
+    private final class TextRowKey: NSObject {
+        let cells: [ScreenCell]
+        private let fingerprint: Int
+        init(_ cells: [ScreenCell]) {
+            self.cells = cells
+            fingerprint = cells.hashValue
+        }
+        override var hash: Int { fingerprint }
+        override func isEqual(_ object: Any?) -> Bool {
+            guard let other = object as? TextRowKey else { return false }
+            return fingerprint == other.fingerprint && cells == other.cells
+        }
+    }
     private var selectionAnchor: (x: Int, y: Int)?
     /// The link a tap landed on, for the edit menu.
     private var menuLink: URL?
@@ -318,7 +351,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
                     x: g.origin.x + CGFloat(selected.lowerBound) * g.cellWidth, y: top,
                     width: CGFloat(selected.count) * g.cellWidth, height: g.cellHeight))
             }
-            drawText(line, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts)
+            drawCachedText(line, top: top, geometry: g)
         }
         if let cursor = screen.cursor, cursor.y < screen.lines.count {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
@@ -336,6 +369,52 @@ final class TerminalCanvasView: UIView, UIKeyInput {
             UIColor(screen.foreground).withAlphaComponent(0.45).setFill()
             UIBezierPath(roundedRect: thumb, cornerRadius: thumb.width / 2).fill()
         }
+    }
+
+    private func drawCachedText(_ line: [ScreenCell], top: CGFloat, geometry g: Geometry) {
+        let scale = max(contentScaleFactor, 1)
+        let configuration = TextRowConfiguration(size: g.fonts.size, family: g.fonts.family,
+            scale: scale, foreground: screen.foreground, background: screen.background)
+        if textRowConfiguration != configuration {
+            textRows.removeAll(keepingCapacity: true)
+            textRowBytes = 0
+            textRowConfiguration = configuration
+        }
+        let key = TextRowKey(line)
+        textRowUse &+= 1
+        let image: UIImage
+        if var cached = textRows[key] {
+            cached.used = textRowUse
+            textRows[key] = cached
+            image = cached.image
+        } else {
+            // One point of bleed retains italic edges and descenders. The bitmap is transparent
+            // so a selection changing underneath it never requires shaping the text again.
+            let size = CGSize(width: ceil(CGFloat(line.count) * g.cellWidth) + 2, height: g.cellHeight + 2)
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = scale
+            format.preferredRange = .standard
+            image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                drawText(line, top: 1, origin: CGPoint(x: 1, y: 0),
+                    cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts)
+            }
+            if let bitmap = image.cgImage {
+                let bytes = bitmap.bytesPerRow * bitmap.height
+                // A strict budget and LRU eviction avoid NSCache's advisory limits and bulk
+                // purges, which caused measurable frame-time spikes during repeated edits.
+                let budget = 12 * 1024 * 1024
+                if bytes <= budget {
+                    while textRowBytes + bytes > budget || textRows.count >= 160 {
+                        guard let oldest = textRows.min(by: { $0.value.used < $1.value.used }) else { break }
+                        textRowBytes -= oldest.value.bytes
+                        textRows.removeValue(forKey: oldest.key)
+                    }
+                    textRows[key] = TextRow(image: image, bytes: bytes, used: textRowUse)
+                    textRowBytes += bytes
+                }
+            }
+        }
+        image.draw(at: CGPoint(x: g.origin.x - 1, y: top - 1))
     }
 
     /// Shown only while scrolled back; the live bottom needs no indicator.
@@ -372,11 +451,19 @@ final class TerminalCanvasView: UIView, UIKeyInput {
             var end = x + 1
             while end < line.count, colors(line[end].style).bg == bg { end += 1 }
             UIColor(bg).setFill()
-            context.fill(CGRect(
+            context.fill(pixelAligned(CGRect(
                 x: origin.x + CGFloat(x) * cellWidth, y: top,
-                width: CGFloat(end - x) * cellWidth, height: cellHeight))
+                width: CGFloat(end - x) * cellWidth, height: cellHeight)))
             x = end
         }
+    }
+
+    private func pixelAligned(_ rect: CGRect) -> CGRect {
+        let scale = max(contentScaleFactor, 1)
+        let x = (rect.minX * scale).rounded() / scale
+        let y = (rect.minY * scale).rounded() / scale
+        return CGRect(x: x, y: y, width: (rect.maxX * scale).rounded() / scale - x,
+            height: (rect.maxY * scale).rounded() / scale - y)
     }
 
     /// Groups plain single-width cells of one style into runs; wide or complex
@@ -430,10 +517,84 @@ final class TerminalCanvasView: UIView, UIKeyInput {
             }
             var style = cell.style
             if linked.contains(x) { style.underline = true }
-            NSAttributedString(string: text, attributes: attributes(style, fonts: fonts))
-                .draw(at: CGPoint(x: origin.x + CGFloat(x) * cellWidth, y: top))
+            drawGlyph(text, style: style, fonts: fonts, box: CGRect(
+                x: origin.x + CGFloat(x) * cellWidth, y: top,
+                width: CGFloat(max(Int(cell.width), 1)) * cellWidth, height: cellHeight))
             x = end
         }
+    }
+
+    /// Private-use symbols must never fall through to an unrelated emoji or spill over the
+    /// next cell. Ordinary graphemes keep UIKit's shaping/fallback (CJK, combining, color emoji).
+    private func drawGlyph(_ text: String, style: CellStyle, fonts: Fonts, box: CGRect, color: RGB? = nil) {
+        guard !style.invisible else { return }
+        guard let scalar = text.unicodeScalars.first, text.unicodeScalars.count == 1,
+              scalar.properties.generalCategory == .privateUse,
+              let context = UIGraphicsGetCurrentContext()
+        else {
+            NSAttributedString(string: text, attributes: attributes(style, fonts: fonts, color: color)).draw(at: box.origin)
+            return
+        }
+        let fg = UIColor(color ?? colors(style).fg).withAlphaComponent(style.faint ? 0.6 : 1)
+        let box = pixelAligned(box)
+        context.saveGState()
+        defer {
+            context.restoreGState()
+            if style.underline || style.strikethrough {
+                context.saveGState()
+                fg.setFill()
+                let thickness = 1 / max(contentScaleFactor, 1)
+                if style.underline { context.fill(CGRect(x: box.minX, y: box.maxY - 2, width: box.width, height: thickness)) }
+                if style.strikethrough { context.fill(CGRect(x: box.minX, y: box.midY, width: box.width, height: thickness)) }
+                context.restoreGState()
+            }
+        }
+        context.clip(to: box)
+        fg.setFill()
+        fg.setStroke()
+        if (0xE0B0...0xE0B3).contains(scalar.value) {
+            // Exact cell geometry avoids font-dependent gaps at segment boundaries.
+            let right = scalar.value < 0xE0B2
+            let edge = right ? box.minX : box.maxX
+            let tip = right ? box.maxX : box.minX
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: edge, y: box.minY))
+            path.addLine(to: CGPoint(x: tip, y: box.midY))
+            path.addLine(to: CGPoint(x: edge, y: box.maxY))
+            if scalar.value % 2 == 0 {
+                path.closeSubpath()
+                context.addPath(path)
+                context.fillPath()
+            } else {
+                context.addPath(path)
+                context.setLineWidth(max(1 / contentScaleFactor, box.width / 12))
+                context.strokePath()
+            }
+            return
+        }
+        let font = fonts.symbols
+        let ctFont = font as CTFont
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: text,
+            attributes: [.font: font, .foregroundColor: fg]))
+        let ink = CTLineGetBoundsWithOptions(line, [.useGlyphPathBounds])
+        // Missing PUA is a quiet empty box, not LastResort text or an emoji. Ask the bundled
+        // face directly; CoreText lines can otherwise silently fall back while shaping.
+        let utf16 = Array(text.utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+        guard CTFontGetGlyphsForCharacters(ctFont, utf16, &glyphs, utf16.count),
+              ink.width > 0, ink.height > 0 else {
+            context.stroke(box.insetBy(dx: box.width * 0.25, dy: box.height * 0.25), width: 1 / contentScaleFactor)
+            return
+        }
+        let fit = min(1, box.width / ink.width, box.height / ink.height)
+        let x = box.midX - (ink.midX * fit)
+        // Share the selected text face's baseline unless the symbol would leave its cell.
+        let baseline = min(max(fonts.regular.ascender, ink.maxY * fit), box.height + ink.minY * fit)
+        context.translateBy(x: x, y: box.minY + baseline)
+        context.scaleBy(x: fit, y: -fit)
+        context.textMatrix = .identity
+        context.textPosition = .zero
+        CTLineDraw(line, context)
     }
 
     /// The dots of a braille pattern (U+2800–U+28FF), nil for anything else.
@@ -496,9 +657,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
             }
             context.fill(box)
             if let cell, !cell.text.isEmpty {
-                NSAttributedString(
-                    string: cell.text, attributes: attributes(cell.style, fonts: fonts, color: screen.background)
-                ).draw(at: box.origin)
+                drawGlyph(cell.text, style: cell.style, fonts: fonts, box: box, color: screen.background)
             }
         }
     }
@@ -885,6 +1044,7 @@ struct Fonts {
     let bold: UIFont
     let italic: UIFont
     let boldItalic: UIFont
+    let symbols: UIFont
     let cellWidth: CGFloat
     let cellHeight: CGFloat
 
@@ -892,14 +1052,20 @@ struct Fonts {
         self.size = size
         self.family = family
         let names = family.names
-        regular = names[0].flatMap { Self.mono($0, size) } ?? .monospacedSystemFont(ofSize: size, weight: .regular)
-        bold = names[1].flatMap { Self.mono($0, size) } ?? .monospacedSystemFont(ofSize: size, weight: .bold)
+        let base = names[0].flatMap { Self.mono($0, size) } ?? .monospacedSystemFont(ofSize: size, weight: .regular)
+        let symbols = Self.mono("SymbolsNFM", size) ?? base
+        self.symbols = symbols
+        func cascade(_ font: UIFont) -> UIFont {
+            UIFont(descriptor: font.fontDescriptor.addingAttributes([.cascadeList: [symbols.fontDescriptor]]), size: size)
+        }
+        regular = cascade(base)
+        bold = cascade(names[1].flatMap { Self.mono($0, size) } ?? .monospacedSystemFont(ofSize: size, weight: .bold))
         func italicized(_ font: UIFont) -> UIFont {
             font.fontDescriptor.withSymbolicTraits(font.fontDescriptor.symbolicTraits.union(.traitItalic))
                 .map { UIFont(descriptor: $0, size: size) } ?? font
         }
-        italic = names[2].flatMap { Self.mono($0, size) } ?? italicized(regular)
-        boldItalic = names[3].flatMap { Self.mono($0, size) } ?? italicized(bold)
+        italic = cascade(names[2].flatMap { Self.mono($0, size) } ?? italicized(regular))
+        boldItalic = cascade(names[3].flatMap { Self.mono($0, size) } ?? italicized(bold))
         cellWidth = ("M" as NSString).size(withAttributes: [.font: regular]).width
         cellHeight = ceil(regular.lineHeight)
     }

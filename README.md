@@ -60,8 +60,50 @@ just test      # HerdrKit tests
 To run it on your own iPhone, sign with your team: set `HIRTE_TEAM` and `HIRTE_BUNDLE_ID_PREFIX`
 in `.envrc.local` (see `.envrc`), then `just phone`. `just` lists the other commands.
 
+### Lokal testen
+
+`just sim` baut Hirte Dev und startet die App im Simulator über die zu Xcode gehörende
+DeviceHub-App. Standard ist „iPhone 17 Pro“; mit `HIRTE_SIMULATOR="Gerätename" just sim`
+lässt sich ein anderer installierter Simulator wählen. Unter Settings → Add Demo Machine
+kannst du die Oberfläche ohne SSH-Host ausprobieren. `just test` führt die HerdrKit-Tests aus.
+
+Unter Settings → Agents → Agent Overview kannst du die Zeilenfelder mit Vorschau anpassen;
+Titel und Status bleiben sichtbar, fehlende Kontextwerte werden ausgeblendet. Das zusätzliche
+Menü „View and Sort“ in der Agentenübersicht bietet „Individual“ und „Nested“ sowie die
+Sortierung. In Settings → Light Theme / Dark Theme findest du die Theme-Galerie; über „+“
+kannst du Ghostty-Theme-Text einfügen oder eine Datei importieren und vor dem Speichern
+prüfen. Die gebündelte Symbols Nerd Font Mono dient als Fallback für Nerd-Font-Symbole
+im Terminal; die ausgewählte Textschrift bleibt erhalten.
+
+Live Activities sind lokal und optional: Aktiviere unter Settings → Live Activity „Follow on
+Lock Screen (Beta)“ und wähle im Terminalmenü einen arbeitenden Agenten zum Folgen aus.
+Aktualisierungen erfolgen, solange Hirte geöffnet und verbunden ist; im Hintergrund oder bei
+Verbindungsverlust bleibt der zuletzt bekannte Stand sichtbar. Öffne Hirte zum Aktualisieren.
+Die Anzeige bietet keine verlässliche Hintergrundüberwachung.
+
+### Optionaler Host-Kontext
+
+Auf dem Host mit dem bestehenden herdr-core, `hc`, `git` und Python 3 kannst du den Kontext
+eines freigegebenen lokalen Terminals über Labels bereitstellen:
+
+```sh
+python3 scripts/publish-context.py --terminal t7
+python3 scripts/publish-context.py --terminal t7 --watch
+```
+
+Ersetze `t7` durch die lokale Terminaladresse aus `hc ls`; `--terminal` lässt sich wiederholen.
+Ohne `--watch` wird einmal aktualisiert, mit `--watch` regelmäßig bis zum Abbruch mit Ctrl-C.
+Die fünf Anzeigewerte sind Branch, Projekt, Verzeichnis, Agent und Account; ein zusätzlicher
+Erstellungszeitstempel ordnet sie der Terminalinstanz zu. Account ist ein lesbarer Profilalias,
+kein Zugangsschlüssel. Das Skript veröffentlicht keine Secrets und braucht keine Registrierung
+bei GitHub. Die Labels erreichen Hirte über die bestehende Host-Verbindung; fehlende Werte
+bleiben in der Übersicht ausgeblendet.
+
 ## License
 
 Apache-2.0, see [LICENSE](LICENSE). Hirte ships Ghostty (libghostty-vt), Citadel, SwiftNIO and
-other open-source code, the JetBrains Mono and Comic Mono fonts, and themes from
-iTerm2-Color-Schemes; their licenses are in the app under Settings → Open-Source Licenses.
+other open-source code, the JetBrains Mono, Comic Mono and Symbols Nerd Font Mono fonts,
+agent icon assets attributed to herdr / LobeHub, and themes from iTerm2-Color-Schemes;
+their licenses and component notices are in the app under Settings → Open-Source Licenses.
+Brand names and marks remain their owners' trademarks; the icon licenses do not grant
+trademark rights.

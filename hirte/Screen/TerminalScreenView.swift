@@ -89,6 +89,7 @@ struct TerminalScreenView: View {
                         model.wantsKeyboard.toggle()
                     }
                 }
+                LiveActivityFollowMenu(session: session, terminal: terminal)
                 // Hiding and showing the lists is the split view's own sidebar button.
                 Button("Info", systemImage: "info.circle") { showingInfo = true }
             }
@@ -120,7 +121,10 @@ struct TerminalScreenView: View {
             model.setWatching(true)
         }
         // On screen: its agent counts as read (herdr's shared `herdr.seen`).
-        .onAppear { session.startLooking(at: address) }
+        .onAppear {
+            FollowController.shared.terminalOpened(hostID: session.host.id, address: address)
+            session.startLooking(at: address)
+        }
         .onDisappear {
             model.stop()
             session.stopLooking(at: address)

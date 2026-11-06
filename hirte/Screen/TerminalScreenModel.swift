@@ -30,7 +30,8 @@ final class TerminalScreenModel {
     private var vt: VirtualTerminal?
     private var attached: AttachedTerminal?
     private var pump: Task<Void, Never>?
-    private var renderScheduled = false
+    @ObservationIgnored private var displayLink: CADisplayLink?
+    @ObservationIgnored private var holdTimeout: Task<Void, Never>?
     /// What this view would like (fits its bounds); sent whenever we act.
     private var preferredSize: (cols: Int, rows: Int)?
     private var session: HostSession?
@@ -88,6 +89,10 @@ final class TerminalScreenModel {
     }
 
     func stop() {
+        displayLink?.invalidate()
+        displayLink = nil
+        holdTimeout?.cancel()
+        holdTimeout = nil
         pump?.cancel()
         pump = nil
         let attached = self.attached
@@ -355,17 +360,38 @@ final class TerminalScreenModel {
 
     /// Coalesces bursts of output into one frame.
     private func scheduleRender() {
-        guard !renderScheduled else { return }
-        renderScheduled = true
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(8))
-            renderScheduled = false
-            renderNow()
-        }
+        guard displayLink == nil else { return }
+        let tick = TerminalRenderTick { [weak self] in self?.renderNow() }
+        let link = CADisplayLink(target: tick, selector: #selector(TerminalRenderTick.fire(_:)))
+        displayLink = link
+        // Common mode keeps output moving during scrolling. A one-shot link batches network
+        // chunks to the display cadence and is invalidated before drawing: zero idle ticks.
+        link.add(to: .main, forMode: .common)
     }
 
     private func renderNow() {
+        displayLink?.invalidate()
+        displayLink = nil
+        holdTimeout?.cancel()
+        holdTimeout = nil
         guard let vt else { return }
         frame = vt.frame()
+        if let remaining = vt.renderHoldRemaining {
+            holdTimeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(remaining)) }
+                catch { return }
+                self?.renderNow()
+            }
+        }
+    }
+}
+
+/// CADisplayLink retains its target. The weak model capture avoids a model/link cycle.
+private final class TerminalRenderTick: NSObject {
+    let render: () -> Void
+    init(render: @escaping () -> Void) { self.render = render }
+    @objc func fire(_ link: CADisplayLink) {
+        link.invalidate()
+        render()
     }
 }

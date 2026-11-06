@@ -24,6 +24,10 @@ struct TerminalListView: View {
     @State private var held: (address: String, state: AgentState)?
     /// Collapsed sections as "hostID|sectionID" lines, remembered across launches.
     @AppStorage("terminals.collapsed") private var collapsed = ""
+    @AppStorage(AgentOverviewPreferences.storageKey) private var overviewStored = ""
+    @State private var showingAgentSettings = false
+
+    private var overview: AgentOverviewPreferences { .init(rawValue: overviewStored) }
 
     enum Mode: String, CaseIterable, Identifiable {
         case agents, terminals
@@ -35,6 +39,9 @@ struct TerminalListView: View {
         content
             .navigationTitle(session.host.name)
             .toolbar {
+                if mode == .agents {
+                    ToolbarItem(placement: .topBarTrailing) { overviewMenu }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("New Terminal", systemImage: "plus") {
                         newTerminal = NewTerminalContext(folder: nil)
@@ -51,6 +58,16 @@ struct TerminalListView: View {
             .sheet(item: $newTerminal) { context in
                 NewTerminalView(session: session, context: context) { address in
                     selection = address
+                }
+            }
+            .sheet(isPresented: $showingAgentSettings) {
+                NavigationStack {
+                    AgentOverviewSettingsView()
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Done") { showingAgentSettings = false }
+                            }
+                        }
                 }
             }
             .confirmationDialog(
@@ -106,7 +123,10 @@ struct TerminalListView: View {
     }
 
     private func rowView(_ row: TerminalRow) -> some View {
-        let terminal = row.terminal
+        rowView(row, terminal: row.terminal)
+    }
+
+    private func rowView<Content: View>(_ row: Content, terminal: Terminal) -> some View {
         var add: ((Terminal) -> Void)?
         if canAddToHerdrApp(terminal) { add = { addToHerdrApp($0) } }
         let actions = TerminalActions(
@@ -197,23 +217,47 @@ struct TerminalListView: View {
         session.terminals.filter { !$0.isLive }.sorted { $0.createdMs > $1.createdMs }
     }
 
-    /// The agents (terminals that report a status) by what they need, "Needs you" first; within
-    /// a section in the order of their spaces. Empty sections are left out.
-    private var agentGroups: [AgentGroup] {
-        var rows: [AgentState: [AgentGroup.Row]] = [:]
-        for section in TerminalGrouping.bySpace(session.terminals.filter(\.isAgent), layout: session.layout) {
-            let space: String? = if case .other = section.kind { nil } else { section.title }
-            for row in section.rows where row.terminal.isAgent {
-                rows[shownState(row.terminal), default: []].append(.init(terminal: row.terminal, space: space))
-            }
-        }
-        return AgentState.allCases.compactMap { state in rows[state].map { AgentGroup(state: state, rows: $0) } }
+    private var agentGroups: [AgentOverviewGroup] {
+        AgentOverview.groups(session.terminals, mode: overview.mode, sort: overview.sort,
+                             held: held.map { [$0.address: $0.state] } ?? [:])
     }
 
-    private func shownState(_ terminal: Terminal) -> AgentState {
-        let state = terminal.agentState ?? .idle
-        if state == .idle, let held, held.address == terminal.address, held.state == .done { return .done }
-        return state
+    private var agentSpaces: [String: String] {
+        var result: [String: String] = [:]
+        for section in TerminalGrouping.bySpace(session.terminals.filter(\.isLive), layout: session.layout) {
+            if case .other = section.kind { continue }
+            for row in section.rows { result[row.terminal.address] = section.title }
+        }
+        return result
+    }
+
+    private func visibleAgentRows(_ group: AgentOverviewGroup) -> [AgentOverviewRow] {
+        group.rows.filter { row in
+            row.ancestors.allSatisfy { expanded("agent:\($0)").wrappedValue }
+        }
+    }
+
+    private func overviewBinding<Value>(_ keyPath: WritableKeyPath<AgentOverviewPreferences, Value>) -> Binding<Value> {
+        Binding(get: { overview[keyPath: keyPath] }, set: { value in
+            var updated = overview
+            updated[keyPath: keyPath] = value
+            overviewStored = updated.rawValue
+        })
+    }
+
+    private var overviewMenu: some View {
+        Menu {
+            Picker("Agent view", selection: overviewBinding(\.mode)) {
+                ForEach(AgentOverviewMode.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Picker("Sort by", selection: overviewBinding(\.sort)) {
+                ForEach(AgentOverviewSort.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            Button("Customize Rows…", systemImage: "slider.horizontal.3") { showingAgentSettings = true }
+        } label: {
+            Label("View and Sort", systemImage: "arrow.up.arrow.down")
+        }
+        .accessibilityIdentifier("agent-overview-menu")
     }
 
     /// One list per view (`.id`), swapped without animation: agents are rows in both, and
@@ -258,7 +302,10 @@ struct TerminalListView: View {
 
     /// The rows of a view, top to bottom.
     private func rowOrder(_ shown: Mode) -> [String] {
-        if shown == .agents { return agentGroups.flatMap { $0.rows.map(\.terminal.address) } }
+        if shown == .agents {
+            return agentGroups.filter { expanded("status:\($0.state.rawValue)", initially: $0.state != .idle).wrappedValue }
+                .flatMap { visibleAgentRows($0).map(\.terminal.address) }
+        }
         let open = expanded("finished", initially: false).wrappedValue
         return spaceSections.flatMap { $0.rows.map(\.terminal.address) } + (open ? finished.map(\.address) : [])
     }
@@ -280,6 +327,7 @@ struct TerminalListView: View {
             switch shown {
             case .agents:
                 let groups = agentGroups
+                let spaces = agentSpaces
                 if groups.isEmpty {
                     ContentUnavailableView(
                         "No agents", systemImage: "sparkles",
@@ -288,10 +336,13 @@ struct TerminalListView: View {
                 // Each header has its status's dot: the headers are the legend.
                 ForEach(groups) { group in
                     Section(isExpanded: expanded("status:\(group.state.rawValue)", initially: group.state != .idle)) {
-                        ForEach(group.rows) { row in
-                            rowView(TerminalRow(
-                                terminal: row.terminal, inSpace: true, style: .agent, space: row.space,
-                                agentState: group.state))
+                        ForEach(visibleAgentRows(group)) { row in
+                            rowView(AgentOverviewRowView(
+                                terminal: row.terminal, state: row.state,
+                                context: TerminalContext(terminal: row.terminal, project: spaces[row.id]),
+                                preferences: overview, space: spaces[row.id], depth: row.depth,
+                                reason: row.reason, familyState: group.state, childCount: row.childCount,
+                                expanded: row.childCount > 0 ? expanded("agent:\(row.id)") : nil), terminal: row.terminal)
                                 .modifier(tracking(row.terminal.address, in: shown))
                         }
                     } header: {
@@ -308,7 +359,7 @@ struct TerminalListView: View {
                     Section(isExpanded: expanded(section.id)) {
                         ForEach(section.rows) { row in
                             rowView(TerminalRow(
-                                terminal: row.terminal, depth: row.depth, tab: row.tab, inSpace: true, style: .terminal))
+                                terminal: row.terminal, depth: row.depth, tab: row.tab, inSpace: true))
                                 .modifier(tracking(row.terminal.address, in: shown))
                         }
                     } header: {
@@ -328,7 +379,7 @@ struct TerminalListView: View {
                 if !finished.isEmpty {
                     Section(isExpanded: expanded("finished", initially: false)) {
                         ForEach(finished) { terminal in
-                            rowView(TerminalRow(terminal: terminal, style: .terminal))
+                            rowView(TerminalRow(terminal: terminal))
                                 .modifier(tracking(terminal.address, in: shown))
                         }
                     } header: {
@@ -432,83 +483,8 @@ struct TerminalRow: View {
     var tab: String?
     /// Inside a space section the space name is already the header.
     var inSpace = false
-    var style = Style.agent
-    /// Its space, for an agent row that isn't under its space's header.
-    var space: String?
-    /// How the agents view shows it (read state included); else its status's own word.
-    var agentState: AgentState?
-    @State private var explaining = false
-
-    enum Style {
-        /// What it is doing first, its status as a dot on the right.
-        case agent
-        /// Its name, program and folder; no status.
-        case terminal
-    }
-
     var body: some View {
-        switch style {
-        case .agent: agentRow
-        case .terminal: terminalRow
-        }
-    }
-
-    private var agentRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(terminal.headline(inSpace: inSpace)).lineLimit(1)
-                let detail = [space, terminal.detail(inSpace: inSpace)].compactMap { $0 }.joined(separator: " · ")
-                if !detail.isEmpty {
-                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                if let progress = terminal.status?.progress, terminal.isLive, terminal.status?.state == "working" {
-                    ProgressView(value: Double(min(max(progress, 0), 100)), total: 100)
-                        .tint(StatusDot.color(for: "working"))
-                        .scaleEffect(y: 0.6)
-                        .padding(.top, 2)
-                }
-            }
-            Spacer(minLength: 8)
-            if let agentState {
-                // Tap the dot (or its time) for what it means.
-                Button { explaining = true } label: {
-                    HStack(spacing: 6) {
-                        if let since = terminal.statusSince {
-                            // Not `.everyMinute`: its dates are minute starts, up to 59 s early.
-                            TimelineView(.periodic(from: .now, by: 30)) { context in
-                                Text(Terminal.shortAge(since, now: context.date))
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        StatusDot(agent: agentState)
-                    }
-                    .padding(.leading, 12)
-                    .padding(.vertical, 2)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel(terminal.statusSince.map {
-                    "\(agentState.title), since \($0.formatted(.relative(presentation: .named)))"
-                } ?? agentState.title)
-                .popover(isPresented: $explaining) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Label { Text(agentState.explanation) } icon: { StatusDot(agent: agentState) }
-                        if let since = terminal.statusSince {
-                            Text("Since \(since.formatted(.relative(presentation: .named)))")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .font(.callout)
-                    .padding()
-                    .presentationCompactAdaptation(.popover)
-                }
-            } else {
-                StatusDot(state: terminal.isLive ? terminal.status?.state : "finished")
-                    .padding(.top, 6)
-            }
-        }
-        .accessibilityIdentifier(terminal.address)
+        terminalRow
     }
 
     private var terminalRow: some View {
@@ -792,27 +768,13 @@ struct NeedsYouBadge: View {
     }
 }
 
-/// One status section of the agents view.
-struct AgentGroup: Identifiable {
-    struct Row: Identifiable {
-        let terminal: Terminal
-        /// The space (or machine) it belongs to; nil outside herdr-app's spaces.
-        let space: String?
-        var id: String { terminal.address }
-    }
-
-    let state: AgentState
-    let rows: [Row]
-    var id: AgentState { state }
-}
-
 /// The status's dot, its name and how many: together the colors' legend.
 struct AgentGroupHeader: View {
-    let group: AgentGroup
+    let group: AgentOverviewGroup
 
     var body: some View {
         HStack(spacing: 8) {
-            StatusDot(agent: group.state).accessibilityHidden(true)
+            StatusDot(state: group.state.statusWord).accessibilityHidden(true)
             Text(group.state.title)
             Spacer()
             Text("\(group.rows.count)").foregroundStyle(.secondary)

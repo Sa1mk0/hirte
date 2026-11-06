@@ -8,6 +8,9 @@ struct RootView: View {
     @Environment(KeyLibrary.self) private var keys
     @Environment(\.scenePhase) private var scenePhase
     @State private var sessions = SessionStore()
+    @State private var windowID = UUID()
+    @State private var pendingFollowRoute: FollowTask?
+    private let follow = FollowController.shared
     /// The machine shown in the sidebar, remembered across launches.
     @AppStorage("selectedHost") private var storedHost = ""
     @State private var selectedTerminal: String?
@@ -21,6 +24,20 @@ struct RootView: View {
                 return ids.first
             },
             set: { storedHost = $0?.uuidString ?? "" })
+    }
+
+    private var pendingSessionConnected: Bool {
+        guard let task = pendingFollowRoute else { return false }
+        return sessions.existing(task.hostID)?.state == .connected
+    }
+
+    private func openFollowRoute() {
+        guard let task = pendingFollowRoute,
+              let session = sessions.existing(task.hostID), session.state == .connected else { return }
+        defer { pendingFollowRoute = nil }
+        guard let terminal = session.terminal(task.address), task.matches(hostID: session.host.id, terminal: terminal) else { return }
+        selectedTerminal = terminal.address
+        follow.terminalOpened(hostID: task.hostID, address: terminal.address)
     }
 
     var body: some View {
@@ -42,6 +59,22 @@ struct RootView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
+        .task { follow.window(windowID, phase: scenePhase) }
+        .onDisappear { follow.removeWindow(windowID) }
+        .onOpenURL { url in
+            guard let task = follow.route(for: url),
+                  let host = hosts.hosts.first(where: { $0.id == task.hostID }) else { return }
+            pendingFollowRoute = task
+            selectedHost.wrappedValue = host.id
+            sessions.session(for: host).start(keys: keys)
+        }
+        .onChange(of: pendingSessionConnected) { openFollowRoute() }
+        .task(id: pendingFollowRoute?.followID) {
+            guard pendingFollowRoute != nil else { return }
+            // Let the host selection settle before opening its detail.
+            await Task.yield()
+            openFollowRoute()
+        }
         #if DEBUG
         // `-hirte.demo YES` (videos, UI tests on a device with real machines): open the demo machine.
         .task {
@@ -52,6 +85,7 @@ struct RootView: View {
             selectedTerminal = nil
         }
         .onChange(of: hosts.hosts) { _, current in
+            follow.hostsChanged(Set(current.map(\.id)))
             // Edited or deleted machines get a fresh session.
             for host in current where sessions.existing(host.id).map({ $0.host != host }) ?? false {
                 sessions.remove(host.id)
@@ -61,6 +95,7 @@ struct RootView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            follow.window(windowID, phase: phase)
             switch phase {
             case .background: sessions.pauseAll()
             case .active: sessions.resumePaused(keys: keys)

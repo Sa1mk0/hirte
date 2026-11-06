@@ -113,6 +113,13 @@ public final class VirtualTerminal {
     private var mouseEvent: GhosttyMouseEvent?
     /// Lines from the previous frame, reused when libghostty-vt says a row is clean.
     private var cachedLines: [[ScreenCell]] = []
+    private var heldFrame: ScreenFrame?
+    private var holdStarted: TimeInterval?
+    /// A single deadline, not an idle polling timer. The UI schedules one wakeup if the
+    /// application never finishes its synchronized update (DEC private mode 2026).
+    public var renderHoldRemaining: TimeInterval? {
+        holdStarted.map { max(0, 1 - (ProcessInfo.processInfo.systemUptime - $0)) }
+    }
     /// What the emulator answered (queries, mode 2048 size reports) since the last `takeReplies()`.
     private var replies = Data()
     /// A cell's size in pixels, for size reports (mode 2048, XTWINOPS); 0 when unknown.
@@ -148,6 +155,21 @@ public final class VirtualTerminal {
         try check(ghostty_key_event_new(nil, &keyEvent), "key_event_new")
         try check(ghostty_mouse_encoder_new(nil, &mouseEncoder), "mouse_encoder_new")
         try check(ghostty_mouse_event_new(nil, &mouseEvent), "mouse_event_new")
+        let renderHold: GhosttyTerminalRenderHoldFn = { _, userdata, held in
+            guard let userdata else { return }
+            let vt = Unmanaged<VirtualTerminal>.fromOpaque(userdata).takeUnretainedValue()
+            if held {
+                // Capture here, before the rest of this same write is parsed. Merely checking
+                // mode 2026 at the next UI tick can miss a completed frame between two holds.
+                vt.heldFrame = vt.frame()
+                vt.holdStarted = ProcessInfo.processInfo.systemUptime
+            } else {
+                vt.heldFrame = nil
+                vt.holdStarted = nil
+            }
+        }
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
+            unsafeBitCast(renderHold, to: UnsafeRawPointer.self))
     }
 
     deinit {
@@ -216,6 +238,7 @@ public final class VirtualTerminal {
 
     /// Scrolls the viewport through history: negative is up. `nil` jumps back to the bottom.
     public func scroll(by lines: Int?) {
+        endRenderHold()
         var behavior = GhosttyTerminalScrollViewport()
         if let lines {
             behavior.tag = GHOSTTY_SCROLL_VIEWPORT_DELTA
@@ -242,6 +265,10 @@ public final class VirtualTerminal {
 
     /// Reads the current viewport.
     public func frame() -> ScreenFrame {
+        if let remaining = renderHoldRemaining {
+            if remaining > 0, let heldFrame { return heldFrame }
+            endRenderHold()
+        }
         guard ghostty_render_state_update(renderState, terminal) == GHOSTTY_SUCCESS else { return .empty }
 
         var colors = GhosttyRenderStateColors()
@@ -315,6 +342,18 @@ public final class VirtualTerminal {
             cursorColor: colors.cursor_has_value ? RGB(colors.cursor) : nil,
             selection: selection, changedLines: rebuildAll ? nil : changed, scrollbar: scrollbar(),
             cursorRow: cursorState.viewport_has_value ? Int(cursorState.viewport_y) : nil)
+    }
+
+    /// The pinned render-hold API explicitly permits ending a hold for user interaction.
+    /// Mode changes through set() do not invoke the callback, so clear our state as well.
+    private func endRenderHold() {
+        guard holdStarted != nil else { return }
+        var mode = GhosttyTerminalModeConfig()
+        mode.mode = ghostty_mode_new(2026, false)
+        mode.value = false
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_MODE, &mode)
+        holdStarted = nil
+        heldFrame = nil
     }
 
     private func readCell(_ codepoints: inout [UInt32]) -> ScreenCell {
@@ -515,6 +554,7 @@ public final class VirtualTerminal {
     /// Selects from one viewport cell to another (inclusive). Ghostty keeps the
     /// selection on the same text as the screen scrolls.
     public func select(from start: (x: Int, y: Int), to end: (x: Int, y: Int)) {
+        endRenderHold()
         guard let from = gridRef(start), let to = gridRef(end) else { return }
         var selection = GhosttySelection()
         selection.size = MemoryLayout<GhosttySelection>.size
@@ -526,6 +566,7 @@ public final class VirtualTerminal {
 
     /// Selects the word under a viewport cell.
     public func selectWord(at point: (x: Int, y: Int)) {
+        endRenderHold()
         guard let ref = gridRef(point) else { return }
         var options = GhosttyTerminalSelectWordOptions()
         options.size = MemoryLayout<GhosttyTerminalSelectWordOptions>.size
@@ -538,6 +579,7 @@ public final class VirtualTerminal {
     }
 
     public func clearSelection() {
+        endRenderHold()
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, nil)
     }
 
