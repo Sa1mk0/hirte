@@ -34,8 +34,9 @@ struct LiveActivityFollowMenu: View {
     @State private var showingSettings = false
 
     var body: some View {
-        Menu("Lock Screen", systemImage: "lock.rectangle") {
-            if follow.follows(hostID: session.host.id, address: terminal?.address ?? "") {
+        let following = follow.follows(hostID: session.host.id, address: terminal?.address ?? "")
+        Menu("Lock Screen", systemImage: following ? "lock.rectangle.fill" : "lock.rectangle") {
+            if following {
                 Button("Stop Following", role: .destructive) { follow.stop() }
             } else if follow.enabled, follow.isAvailable, let terminal, FollowTask.canFollow(terminal) {
                 Button("Follow on Lock Screen") { follow.start(session: session, terminal: terminal) }
@@ -43,6 +44,7 @@ struct LiveActivityFollowMenu: View {
             }
             Button("Live Activity Settings…") { showingSettings = true }
         }
+        .accessibilityValue(following ? "Following" : "")
         .sheet(isPresented: $showingSettings) {
             NavigationStack {
                 Form { LiveActivitySettingsView() }

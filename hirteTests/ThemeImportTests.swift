@@ -86,6 +86,9 @@ struct ThemeParserTests {
         #expect(GhosttyThemeParser.parse("foreground = #fff").errors == ["Missing background."])
         #expect(GhosttyThemeParser.parse("background = #000").errors == ["Missing foreground."])
         #expect(GhosttyThemeParser.parse(palette()).errors == ["Missing background.", "Missing foreground."])
+        // What's wrong with a line comes first: it's why the value is missing.
+        #expect(GhosttyThemeParser.parse("background = #12345").errors
+            == ["Line 1: “#12345” isn't a color.", "Missing background.", "Missing foreground."])
         // An empty value goes back to the default, as in Ghostty.
         #expect(GhosttyThemeParser.parse("background = #000\nforeground = #fff\nbackground =").errors == ["Missing background."])
     }

@@ -50,3 +50,18 @@ private func contextTerminal(directory: String = "/work/repo", created: UInt64 =
     #expect(context.account == nil)
     #expect(context.agent == "codex")
 }
+
+@Test func aSpaceWorksWhereItsFirstTerminalDoes() throws {
+    func row(_ directory: String) throws -> TerminalSection.Row {
+        .init(terminal: try contextTerminal(directory: directory), depth: 0, tab: nil)
+    }
+    func section(_ kind: TerminalSection.Kind, _ rows: [TerminalSection.Row], subtitle: String? = nil) -> TerminalSection {
+        TerminalSection(kind: kind, title: "site", subtitle: subtitle, rows: rows)
+    }
+    let space = TerminalSection.Kind.space(id: "s")
+    #expect(section(space, [try row("/a"), try row("/b"), try row("/b")]).workingFolder == "/a")
+    #expect(section(space, [], subtitle: "/recorded").workingFolder == "/recorded")
+    #expect(section(space, [], subtitle: "").workingFolder == nil)
+    #expect(section(.other, [try row("/a")]).workingFolder == nil, "other sections have unrelated rows")
+    #expect(section(.machine(name: "m"), [try row("/a")]).workingFolder == nil)
+}

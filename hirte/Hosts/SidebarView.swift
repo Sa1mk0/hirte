@@ -74,10 +74,10 @@ struct SidebarView: View {
         host.isDemo ? "play.rectangle" : "server.rack"
     }
 
-    /// "2 need you", or the connection state when it's not simply connected.
+    /// "2 need you", "1 needs you", or the connection state when it's not simply connected.
     private func detail(for host: Host) -> String? {
         guard let session = sessions.existing(host.id) else { return host.subtitle }
-        if session.needsYouCount > 0 { return "\(session.needsYouCount) need you" }
+        if session.needsYouCount > 0 { return NeedsYouBadge.text(session.needsYouCount) }
         switch session.state {
         case .connected: return host.subtitle
         case .connecting: return "Connecting…"

@@ -178,8 +178,9 @@ enum GhosttyThemeParser {
             } else if !sawColorKey {
                 errors.insert("No theme colors found. A Ghostty theme sets background, foreground and palette colors.", at: 0)
             } else {
-                if foreground == nil { errors.insert("Missing foreground.", at: 0) }
-                if background == nil { errors.insert("Missing background.", at: 0) }
+                // After what's wrong with a line: that's often why it's missing.
+                if background == nil { errors.append("Missing background.") }
+                if foreground == nil { errors.append("Missing foreground.") }
             }
         }
         if errors.count > maxListedErrors {

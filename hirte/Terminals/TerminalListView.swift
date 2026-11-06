@@ -39,9 +39,8 @@ struct TerminalListView: View {
         content
             .navigationTitle(session.host.name)
             .toolbar {
-                if mode == .agents {
-                    ToolbarItem(placement: .topBarTrailing) { overviewMenu }
-                }
+                // One action in both views: the title and the plus stay put when switching, and a
+                // second item would fall into the overflow in the unfolded sidebar.
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("New Terminal", systemImage: "plus") {
                         newTerminal = NewTerminalContext(folder: nil)
@@ -119,22 +118,32 @@ struct TerminalListView: View {
         }
     }
 
-    /// Where a space works: its first terminal's folder, else the folder herdr-app recorded.
+    /// A visible "new terminal here", for real spaces: the same as the header's context menu.
+    private func newTerminalAction(_ section: TerminalSection) -> (() -> Void)? {
+        guard session.state == .connected, case .space(let id) = section.kind,
+              let space = session.layout?.spaces.first(where: { $0.id == id }) else { return nil }
+        return { newTerminal = NewTerminalContext(space: space, folder: spaceFolder(space, section)) }
+    }
+
+    /// Where a new terminal in this space starts.
     private func spaceFolder(_ space: HerdrAppLayout.Space, _ section: TerminalSection) -> String {
-        section.rows.first.map { $0.terminal.foreground?.cwd ?? $0.terminal.cwd } ?? space.folder
+        section.workingFolder ?? space.folder
     }
 
     private func rowView(_ row: TerminalRow) -> some View {
-        rowView(row, terminal: row.terminal)
+        rowView(row, terminal: row.terminal, rails: row.rails)
     }
 
-    private func rowView<Content: View>(_ row: Content, terminal: Terminal) -> some View {
+    private func rowView<Content: View>(_ row: Content, terminal: Terminal, rails: FamilyRails) -> some View {
         var add: ((Terminal) -> Void)?
         if canAddToHerdrApp(terminal) { add = { addToHerdrApp($0) } }
         let actions = TerminalActions(
             terminal: terminal, session: session, kill: { confirmKill = $0 }, remove: { remove($0) },
             addToHerdrApp: add, watch: { watch($0) }, mark: { mark($0, $1) })
+        // Outside the actions' wrappers, or a list doesn't see it.
+        let hidden = rails.hiddenSeparators
         return row.tag(terminal.address).modifier(actions)
+            .listRowSeparator(hidden.isEmpty ? .automatic : .hidden, edges: hidden.isEmpty ? .all : hidden)
     }
 
     /// Live, on this machine, in no herdr-app space or pane, and not an agent's child
@@ -257,8 +266,18 @@ struct TerminalListView: View {
             }
             Button("Customize Rows…", systemImage: "slider.horizontal.3") { showingAgentSettings = true }
         } label: {
-            Label("View and Sort", systemImage: "arrow.up.arrow.down")
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.arrow.down")
+                Text("\(overview.mode.title) · \(overview.sort.title)").lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .font(.subheadline)
+            .foregroundStyle(Color.rowSecondary)
+            .frame(minHeight: SidebarMetrics.touchTarget)
+            .contentShape(Rectangle())
         }
+        .accessibilityLabel("View and Sort")
+        .accessibilityValue("\(overview.mode.title), sorted by \(overview.sort.title)")
         .accessibilityIdentifier("agent-overview-menu")
     }
 
@@ -296,8 +315,14 @@ struct TerminalListView: View {
                 ForEach(Mode.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
             .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                // Under the views' switch, a level below it. Not in the list, whose updates can
+                // swallow a tap on an open menu, and not in the toolbar, where it would overflow.
+                if mode == .agents { overviewMenu.padding(.horizontal, 16) }
+            }
             .background(.bar)
         }
     }
@@ -325,6 +350,7 @@ struct TerminalListView: View {
             // Keep the last list visible while reconnecting, with a banner on top.
             if session.state != .connected {
                 ConnectionBanner(state: session.state, session: session)
+                    .tint(Color.appControl)
             }
             switch shown {
             case .agents:
@@ -337,14 +363,22 @@ struct TerminalListView: View {
                 }
                 // Each header has its status's dot: the headers are the legend.
                 ForEach(groups) { group in
+                    let visible = visibleAgentRows(group)
                     Section(isExpanded: expanded("status:\(group.state.rawValue)", initially: group.state != .idle)) {
-                        ForEach(visibleAgentRows(group)) { row in
+                        let rails = FamilyRails.layout(depths: visible.map(\.depth))
+                        ForEach(Array(visible.enumerated()), id: \.element.id) { index, row in
                             rowView(AgentOverviewRowView(
                                 terminal: row.terminal, state: row.state,
                                 context: TerminalContext(terminal: row.terminal, project: spaces[row.id]),
-                                preferences: overview, space: spaces[row.id], depth: row.depth,
-                                reason: row.reason, familyState: group.state, childCount: row.childCount,
-                                expanded: row.childCount > 0 ? expanded("agent:\(row.id)") : nil), terminal: row.terminal)
+                                preferences: overview, space: spaces[row.id], rails: rails[index],
+                                parent: session.terminal(row.ancestors.last).map {
+                                    TerminalContext(terminal: $0, project: spaces[$0.address])
+                                },
+                                // Only while the member it names is out of sight.
+                                reason: visible.contains { $0.id == row.reason?.address } ? nil : row.reason,
+                                familyState: group.state, childCount: row.childCount,
+                                expanded: row.childCount > 0 ? expanded("agent:\(row.id)") : nil),
+                                terminal: row.terminal, rails: rails[index])
                                 .modifier(tracking(row.terminal.address, in: shown))
                         }
                     } header: {
@@ -359,13 +393,16 @@ struct TerminalListView: View {
                 }
                 ForEach(spaceSections) { section in
                     Section(isExpanded: expanded(section.id)) {
-                        ForEach(section.rows) { row in
+                        let rails = FamilyRails.layout(depths: section.rows.map(\.depth))
+                        ForEach(Array(section.rows.enumerated()), id: \.element.id) { index, row in
                             rowView(TerminalRow(
-                                terminal: row.terminal, depth: row.depth, tab: row.tab, inSpace: true))
+                                terminal: row.terminal, rails: rails[index], tab: row.tab, inSpace: true,
+                                sharedFolder: section.workingFolder,
+                                parent: row.depth > 0 ? session.terminal(row.terminal.parent) : nil))
                                 .modifier(tracking(row.terminal.address, in: shown))
                         }
                     } header: {
-                        SpaceHeader(section: section)
+                        SpaceHeader(section: section, addTerminal: newTerminalAction(section))
                             .contextMenu {
                                 if case .space(let id) = section.kind,
                                    let space = session.layout?.spaces.first(where: { $0.id == id })
@@ -386,14 +423,17 @@ struct TerminalListView: View {
                         }
                     } header: {
                         HStack {
-                            Text("Finished")
+                            Text("Finished").sidebarSectionTitle()
                             Spacer()
                             // Only while open: next to the rows it removes, not in the way of
                             // the tap that opens the section.
                             if expanded("finished", initially: false).wrappedValue {
-                                Button("Clear") { confirmClear = finished }
+                                Button { confirmClear = finished } label: {
+                                    // Set on the label: a borderless button draws in the tint.
+                                    Text("Clear").font(.subheadline).foregroundStyle(Color.rowPrimary)
+                                }
                                     .buttonStyle(.borderless)
-                                    .foregroundStyle(.tint)
+                                    .tint(Color.appControl)
                                     .disabled(session.state != .connected)
                                     // On the button, so the popover points at it.
                                     .confirmationDialog(
@@ -409,7 +449,7 @@ struct TerminalListView: View {
                                             : "Their screens and exit codes are gone for good.")
                                     }
                             }
-                            Text("\(finished.count)").foregroundStyle(.secondary)
+                            SidebarCount(count: finished.count)
                         }
                     }
                 }
@@ -429,8 +469,7 @@ struct TerminalListView: View {
             }
         }
         .listStyle(.sidebar)
-        // Sidebar selection uses white labels; the app accent becomes nearly white in dark mode.
-        .tint(Color(red: 48 / 255, green: 52 / 255, blue: 56 / 255))
+        .tint(Color.sidebarSelection)
         .animation(.default, value: session.terminals.map(\.address))
     }
 }
@@ -483,43 +522,53 @@ struct ConnectionBanner: View {
 
 struct TerminalRow: View {
     let terminal: Terminal
-    var depth = 0
+    var rails = FamilyRails()
     var tab: String?
     /// Inside a space section the space name is already the header.
     var inSpace = false
-    var body: some View {
-        terminalRow
+    /// The folder the header shows; only a terminal working elsewhere repeats a path.
+    var sharedFolder: String?
+    /// The terminal it's shown under, whose branch and folder it needn't repeat.
+    var parent: Terminal?
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// At accessibility sizes a column at the row's end would take the text's width: what's there
+    /// moves under the title.
+    private var large: Bool { typeSize.isAccessibilitySize }
+
+    private var tabAndStatus: some View {
+        HStack(spacing: 6) {
+            if let tab {
+                Text(tab)
+                    .font(.caption2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.rowFill, in: Capsule())
+                    .foregroundStyle(Color.rowSecondary)
+                    .lineLimit(large ? nil : 1)
+                    .accessibilityLabel("Tab \(tab)")
+            }
+            if terminal.isLive, let state = terminal.agentState {
+                StatusDot(agent: state)
+            }
+        }
     }
 
-    private var terminalRow: some View {
-        HStack(alignment: .top, spacing: 12) {
-            if depth > 0 {
-                Image(systemName: "arrow.turn.down.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .padding(.leading, CGFloat(depth - 1) * 18)
-                    .padding(.top, 3)
-                    .accessibilityLabel("Started by its parent")
-            }
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(inSpace ? terminal.nameInSpace : terminal.displayName).lineLimit(1)
-                        .foregroundStyle(terminal.isLive ? .primary : .secondary)
-                    Spacer(minLength: 8)
-                    if let tab {
-                        Text(tab)
-                            .font(.caption2)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .background(.quaternary, in: Capsule())
-                            .foregroundStyle(.secondary)
-                            .accessibilityLabel("Tab \(tab)")
-                    }
+    var body: some View {
+        SidebarRow(rails: rails) {
+            AgentProviderIcon(terminal: terminal, neutralSymbol: "terminal")
+        } content: {
+            VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                Text(inSpace ? terminal.headline(inSpace: true) : terminal.displayName)
+                    .lineLimit(large ? nil : 2)
+                    .foregroundStyle(terminal.isLive ? Color.rowPrimary : Color.rowSecondary)
+                if let detail = terminal.detail(inSpace: inSpace, sharedFolder: sharedFolder, parent: parent) {
+                    Text(detail).sidebarDetail().lineLimit(large ? nil : 2)
                 }
-                if let place = terminal.place {
-                    Text(place).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                if large { tabAndStatus }
             }
+        } trailing: {
+            if !large { tabAndStatus.padding(.top, SidebarMetrics.titleLineInset) }
         }
         .accessibilityIdentifier(terminal.address)
     }
@@ -610,21 +659,54 @@ struct TerminalActions: ViewModifier {
     }
 }
 
-/// A section's name and how many of its terminals need you. Spaces, by far the most common,
-/// are just their name, like in herdr-app; only another machine's terminals get an icon.
+/// A section's name, how many terminals it has and how many of them need you, with the folder its
+/// terminals share. Spaces, by far the most common, have no icon, like in herdr-app; only another
+/// machine's terminals get one.
 struct SpaceHeader: View {
     let section: TerminalSection
+    /// New terminal in this space; nil where there's no space to add to or no connection.
+    var addTerminal: (() -> Void)?
+    @Environment(\.dynamicTypeSize) private var typeSize
 
-    var body: some View {
-        HStack(spacing: 6) {
-            if case .machine = section.kind {
-                Image(systemName: "server.rack")
-                    .accessibilityLabel("Machine")
-            }
-            Text(section.title)
-            Spacer()
+    /// The badge and the count; under the name when large text leaves no room beside it.
+    @ViewBuilder private var counts: some View {
+        HStack(spacing: 8) {
             if section.needsYou > 0 {
                 NeedsYouBadge(count: section.needsYou)
+            }
+            SidebarCount(count: section.rows.count)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if case .machine = section.kind {
+                Image(systemName: "server.rack")
+                    .foregroundStyle(Color.rowSecondary)
+                    .accessibilityLabel("Machine")
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(section.title).sidebarSectionTitle().lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                if typeSize.isAccessibilitySize { counts }
+                if let folder = section.workingFolder {
+                    Text(Terminal.abbreviate(folder))
+                        .sidebarDetail()
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 4)
+            if !typeSize.isAccessibilitySize { counts }
+            if let addTerminal {
+                Button(action: addTerminal) {
+                    Image(systemName: "plus")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.rowPrimary)
+                        .frame(width: SidebarMetrics.touchTarget, height: SidebarMetrics.touchTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("New Terminal in \(section.title)")
             }
         }
     }
@@ -633,16 +715,6 @@ struct SpaceHeader: View {
 extension Terminal {
     /// A live terminal whose program reports its status to herdr (an agent).
     var isAgent: Bool { isLive && status != nil }
-
-    /// For the terminals view: the program and folder, or how it ended.
-    var place: String? {
-        if !isLive { return exitCode.map { "exited \($0)" } ?? reason ?? "finished" }
-        if let foreground {
-            return foreground.name == nameInSpace ? Self.abbreviate(foreground.cwd)
-                : "\(foreground.name) · \(Self.abbreviate(foreground.cwd))"
-        }
-        return Self.abbreviate(cwd)
-    }
 
     /// Its name inside a space: without herdr-app's "space / tab" label, which the header already says.
     var nameInSpace: String {
@@ -658,24 +730,26 @@ extension Terminal {
         return inSpace ? nameInSpace : displayName
     }
 
-    /// The row's second line: who it is, then the details the headline leaves out.
-    func detail(inSpace: Bool) -> String? {
+    /// The row's second line: who it is, if the headline is its task, then what isn't shown yet.
+    /// A folder the section's header already says isn't repeated, nor what its parent right above
+    /// it says.
+    func detail(inSpace: Bool, sharedFolder: String? = nil, parent: Terminal? = nil) -> String? {
+        guard isLive else { return exitCode.map { "exited \($0)" } ?? reason ?? "finished" }
         let name = inSpace ? nameInSpace : displayName
-        let usesTitle = isLive && !(status?.title ?? "").isEmpty
-        var parts: [String] = usesTitle ? [name] : []
-        if let status, isLive {
-            if let msg = status.msg, !msg.isEmpty { parts.append(msg) }
-            if !usesTitle && parts.isEmpty { parts.append(status.state) }
-        } else if let foreground {
-            parts.append(foreground.name == name ? Self.abbreviate(foreground.cwd)
-                : "\(foreground.name) · \(Self.abbreviate(foreground.cwd))")
-        } else if !isLive {
-            parts.append(exitCode.map { "exited \($0)" } ?? reason ?? "finished")
-        } else {
-            parts.append(Self.abbreviate(cwd))
+        let context = TerminalContext(terminal: self)
+        var parts: [String] = []
+        if headline(inSpace: inSpace) != name { parts.append(name) }
+        if let program = foreground?.name, program != name { parts.append(program) }
+        let inherited = parent.map { TerminalContext(terminal: $0) }
+        if let branch = context.branch, branch != inherited?.branch { parts.append(branch) }
+        if let directory = context.directory, directory != sharedFolder, directory != inherited?.directory {
+            parts.append(Self.abbreviate(directory))
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return parts.isEmpty ? nil : parts.joined(separator: Self.detailSeparator)
     }
+
+    /// Stays at the end of a line when text wraps, so that no line starts with a dot.
+    static let detailSeparator = "\u{00A0}· "
 
     /// What it is doing: the status message, else the foreground program and folder.
     var summary: String? {
@@ -721,6 +795,7 @@ extension Terminal {
 struct StatusDot: View {
     let state: String?
     var label: String?
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var withoutColor
 
     /// As the agents view shows it: done only while unread.
     init(agent: AgentState) {
@@ -733,10 +808,32 @@ struct StatusDot: View {
     }
 
     var body: some View {
-        Circle()
-            .fill(Self.color(for: state))
-            .frame(width: 10, height: 10)
-            .accessibilityLabel(label ?? state ?? "no status")
+        Group {
+            if withoutColor, let symbol = Self.symbol(for: state) {
+                Image(systemName: symbol)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Self.color(for: state))
+            } else {
+                Circle()
+                    .fill(Self.color(for: state))
+                    // Keeps the dot apart from what's behind it, a selected row's fill above all.
+                    .overlay(Circle().strokeBorder(Color.rowRule, lineWidth: 1))
+                    .frame(width: 10, height: 10)
+            }
+        }
+        .accessibilityLabel(label ?? state ?? "no status")
+    }
+
+    /// With Differentiate Without Color: the status as a shape too.
+    static func symbol(for state: String?) -> String? {
+        switch state {
+        case "working": "arrow.triangle.2.circlepath"
+        case "blocked": "hand.raised.fill"
+        case "error": "exclamationmark.triangle.fill"
+        case "done": "checkmark"
+        case "idle": "moon.fill"
+        default: nil
+        }
     }
 
     static func color(for state: String?) -> Color {
@@ -752,26 +849,6 @@ struct StatusDot: View {
     }
 }
 
-extension Color {
-    /// Hirte's amber: a terminal waits for you.
-    static let needsYou = Color(red: 0xf2 / 255, green: 0xb3 / 255, blue: 0x3d / 255)
-}
-
-/// How many terminals wait for you, in amber.
-struct NeedsYouBadge: View {
-    let count: Int
-
-    var body: some View {
-        Text("\(count)")
-            .font(.caption.bold().monospacedDigit())
-            .padding(.horizontal, 7)
-            .padding(.vertical, 1)
-            .background(Color.needsYou, in: Capsule())
-            .foregroundStyle(Color(red: 0x30 / 255, green: 0x34 / 255, blue: 0x38 / 255))
-            .accessibilityLabel("\(count) need you")
-    }
-}
-
 /// The status's dot, its name and how many: together the colors' legend.
 struct AgentGroupHeader: View {
     let group: AgentOverviewGroup
@@ -779,9 +856,9 @@ struct AgentGroupHeader: View {
     var body: some View {
         HStack(spacing: 8) {
             StatusDot(state: group.state.statusWord).accessibilityHidden(true)
-            Text(group.state.title)
+            Text(group.state.title).sidebarSectionTitle()
             Spacer()
-            Text("\(group.rows.count)").foregroundStyle(.secondary)
+            SidebarCount(count: group.rows.count)
         }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("section-\(group.state.rawValue)")

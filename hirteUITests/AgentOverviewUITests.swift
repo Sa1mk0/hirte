@@ -43,8 +43,10 @@ final class AgentOverviewUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Agent Overview"].waitForExistence(timeout: 5))
         shot("overview-customize-" + appearance)
         let branch = app.switches["Branch"]
-        for _ in 0..<4 where !branch.isHittable { form.swipeUp() }
+        // Hittable isn't enough: on a wide sheet the row can rest half outside its lower edge.
+        for _ in 0..<4 where !branch.isHittable || branch.frame.maxY > form.frame.maxY { form.swipeUp() }
         XCTAssertTrue(branch.isHittable)
+        XCTAssertLessThanOrEqual(branch.frame.maxY, form.frame.maxY, "the whole row is in the sheet")
         XCTAssertEqual(branch.value as? String, "1")
         branch.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0"), object: branch)], timeout: 3), .completed)
@@ -71,21 +73,38 @@ final class AgentOverviewUITests: XCTestCase {
         app.launch()
         let agents = app.buttons["Agents"]
         XCTAssertTrue(agents.waitForExistence(timeout: 10))
+        // Rotation is asynchronous: while the window resizes, taps can miss a row or an open menu.
+        // (Its size alone says nothing about the rotation: iPadOS may show the app in a free window.)
+        XCTAssertEqual(XCUIDevice.shared.orientation, .landscapeLeft)
+        let window = app.windows.firstMatch
+        var size = window.frame.size
+        var steady = 0
+        for _ in 0..<40 where steady < 3 {
+            Thread.sleep(forTimeInterval: 0.25)
+            steady = window.frame.size == size ? steady + 1 : 0
+            size = window.frame.size
+        }
+        XCTAssertEqual(steady, 3, "the window has settled")
         agents.tap()
+        // The view is remembered across launches: choose it, so each shot shows what its name says.
+        choose("Individual", app)
         let agent = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
         XCTAssertTrue(agent.waitForExistence(timeout: 5))
-        agent.tap()
+        // Its visible title, inside the cell: first that the row gets selected, then that it attaches.
+        agent.staticTexts.firstMatch.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isSelected == true"), object: agent)], timeout: 5), .completed, "the row is selected")
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
-        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        XCTAssertTrue(screen.waitForExistence(timeout: 10), "the selected terminal attaches")
         XCTAssertTrue(agent.isHittable, "The selected row remains visible beside the terminal")
         shot("selected-agent-" + appearance)
-        openMenu(app)
-        app.buttons["Nested"].tap()
+        choose("Nested", app)
         let children = app.buttons["children-t1"]
         XCTAssertTrue(children.waitForExistence(timeout: 5))
         XCTAssertTrue(children.isHittable)
         shot("selected-nested-agent-" + appearance)
         children.tap()
+        shot("selected-nested-closed-agent-" + appearance)
         children.tap()
         app.buttons["Terminals"].tap()
         let terminal = app.descendants(matching: .any).matching(identifier: "t5").firstMatch
@@ -94,6 +113,18 @@ final class AgentOverviewUITests: XCTestCase {
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         XCTAssertTrue(terminal.isHittable)
         shot("selected-terminal-" + appearance)
+    }
+
+    /// Picks an agent view from the menu and waits until the list shows it.
+    @MainActor
+    private func choose(_ mode: String, _ app: XCUIApplication) {
+        openMenu(app)
+        let item = app.buttons[mode]
+        XCTAssertTrue(item.waitForExistence(timeout: 5))
+        item.tap()
+        XCTAssertTrue(item.waitForNonExistence(timeout: 5), "the menu closes")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "\(mode) · ")).firstMatch
+            .waitForExistence(timeout: 5), "the list shows \(mode)")
     }
 
     @MainActor

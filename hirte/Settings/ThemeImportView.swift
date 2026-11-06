@@ -91,6 +91,11 @@ struct ThemeImportView: View {
                 Button("Choose File…", systemImage: "doc") { choosingFile = true }
                     .buttonStyle(.borderless)
             }
+            // Right under the text it's about, where the keyboard leaves it in view.
+            ForEach(problems, id: \.self) { problem in
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+            }
         } header: {
             Text("Ghostty Theme")
         } footer: {
@@ -136,16 +141,9 @@ struct ThemeImportView: View {
         .accessibilityHidden(true)
     }
 
+    private var problems: [String] { (fileProblem.map { [$0] } ?? []) + result.errors }
+
     @ViewBuilder private var messages: some View {
-        let problems = (fileProblem.map { [$0] } ?? []) + result.errors
-        if !problems.isEmpty {
-            Section("Can't Import") {
-                ForEach(problems, id: \.self) { problem in
-                    Label(problem, systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.red)
-                }
-            }
-        }
         if !result.notes.isEmpty {
             Section("Notes") {
                 ForEach(result.notes, id: \.self) { note in

@@ -65,7 +65,8 @@ struct TerminalScreenView: View {
                     .frame(maxHeight: .infinity, alignment: .bottom)
             }
         }
-        .navigationTitle(terminal?.nameInSpace ?? address)
+        // Its task, as in the lists, else its name: on a phone the list isn't there to tell.
+        .navigationTitle(terminal?.headline(inSpace: true) ?? address)
         // Watching, the size being watched instead (the screen shows it as an outline).
         .navigationSubtitle(model.watching && terminal != nil
             ? "Watching · \(terminal!.cols)×\(terminal!.rows)" : terminal.flatMap(spaceName) ?? "")
@@ -144,25 +145,26 @@ struct TerminalScreenView: View {
             if terminal?.isLive == false {
                 TerminalDetailView(session: session, address: address)
             } else {
-                ProgressView("Attaching…").padding(.top, 40).tint(.white).foregroundStyle(.white)
+                let foreground = theme.color(theme.foreground)
+                ProgressView("Attaching…").padding(.top, 40).tint(foreground).foregroundStyle(foreground)
             }
         case .live:
             // Watching needs no banner: the subtitle says so, and an outline shows the size.
             if model.sizeOwnedElsewhere && !model.watching {
                 Banner(text: "Another viewer sets the size. Tap the screen and type to take over.",
-                       systemImage: "rectangle.on.rectangle")
+                       systemImage: "rectangle.on.rectangle", dark: theme.dark)
             } else if model.scrolledBack {
                 Button {
                     model.scroll(toBottom: true)
                 } label: {
-                    Banner(text: "Scrolled back. Tap to return to the live screen.", systemImage: "arrow.down.to.line")
+                    Banner(text: "Scrolled back. Tap to return to the live screen.", systemImage: "arrow.down.to.line", dark: theme.dark)
                 }
                 .buttonStyle(.plain)
             }
         case .ended(let reason):
-            Banner(text: reason, systemImage: "stop.circle")
+            Banner(text: reason, systemImage: "stop.circle", dark: theme.dark)
         case .failed(let message):
-            Banner(text: message, systemImage: "exclamationmark.triangle")
+            Banner(text: message, systemImage: "exclamationmark.triangle", dark: theme.dark)
         }
     }
 }
@@ -170,14 +172,17 @@ struct TerminalScreenView: View {
 private struct Banner: View {
     let text: String
     let systemImage: String
+    var dark = true
 
     var body: some View {
         Label(text, systemImage: systemImage)
             .font(.callout)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(.thinMaterial, in: Capsule())
+            .background(.regularMaterial, in: Capsule())
             .padding(.top, 8)
+            // Over the terminal, like the bar below: its brightness, not the app's.
+            .environment(\.colorScheme, dark ? .dark : .light)
     }
 }
 
@@ -200,8 +205,8 @@ private struct NeedsYouBar: View {
                     Label("Yes", systemImage: "checkmark").fixedSize().frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color.needsYou)
-                .foregroundStyle(Color(red: 0x30 / 255, green: 0x34 / 255, blue: 0x38 / 255))
+                .tint(Color.appControl)
+                .foregroundStyle(Color(uiColor: .systemBackground))
                 Button { model.type("n") } label: {
                     Label("No", systemImage: "xmark").fixedSize().frame(maxWidth: .infinity)
                 }
@@ -217,7 +222,7 @@ private struct NeedsYouBar: View {
             .buttonBorderShape(.capsule)
         }
         .padding(16)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(.regularMaterial, in: ConcentricRectangle(corners: .concentric(minimum: 24), isUniform: true))
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
         .environment(\.colorScheme, dark ? .dark : .light)

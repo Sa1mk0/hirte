@@ -7,7 +7,9 @@ struct AgentOverviewRowView: View {
     let context: TerminalContext
     let preferences: AgentOverviewPreferences
     var space: String?
-    var depth = 0
+    var rails = FamilyRails()
+    /// The agent it's shown under: what that row already says isn't repeated, except who runs it.
+    var parent: TerminalContext?
     var reason: Terminal?
     var familyState: AgentOverviewState?
     var childCount = 0
@@ -16,97 +18,167 @@ struct AgentOverviewRowView: View {
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            if depth > 0 {
-                Image(systemName: "arrow.turn.down.right")
-                    .font(.caption).foregroundStyle(.tertiary)
-                    .padding(.leading, CGFloat(min(depth - 1, 3)) * 12)
-                    .accessibilityLabel("Started by its parent")
+        SidebarRow(rails: rails) {
+            if preferences.fields.contains(.icon) {
+                AgentProviderIcon(terminal: terminal)
+            } else if rails.inFamily {
+                // The family's line needs its column.
+                Color.clear.frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
             }
-            if preferences.fields.contains(.icon) { AgentProviderIcon(terminal: terminal) }
-            VStack(alignment: .leading, spacing: 3) {
-                Text(terminal.headline(inSpace: true)).lineLimit(1)
-                if !details.isEmpty {
-                    Text(details.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(typeSize.isAccessibilitySize ? 3 : 2)
+        } content: {
+            VStack(alignment: .leading, spacing: SidebarMetrics.lineGap) {
+                Text(terminal.headline(inSpace: true))
+                    .lineLimit(large ? nil : 2)
+                    .foregroundStyle(Color.rowPrimary)
+                if large { statusButton }
+                if let message { Text(message).sidebarDetail().lineLimit(large ? nil : 1) }
+                // Where it works, then who runs it: each line keeps its facts together, and a
+                // long branch can't take the account with it.
+                if !contextLine.isEmpty { factLine(contextLine) }
+                if !identityLine.isEmpty { factLine(identityLine) }
+                if let directory {
+                    Text(directory).sidebarDetail().lineLimit(1).truncationMode(.middle)
                 }
                 if let reason {
                     Text("Family: \(AgentOverview.title(reason)) — \((familyState ?? AgentOverviewState(terminal: reason)).title)")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        .sidebarDetail().lineLimit(large ? nil : 2)
                 }
                 if preferences.fields.contains(.progress), let progress = terminal.status?.progress,
                    state == .working {
                     ProgressView(value: Double(min(max(progress, 0), 100)), total: 100)
                         .tint(.blue).scaleEffect(y: 0.6).padding(.top, 2)
+                        .accessibilityLabel("Progress")
+                        .accessibilityValue(terminal.status?.msg ?? "\(min(max(progress, 0), 100)) percent")
                 }
-                if let expanded, childCount > 0 {
-                    Button {
-                        expanded.wrappedValue.toggle()
-                    } label: {
-                        Label("\(childCount) \(childCount == 1 ? "child" : "children")",
-                              systemImage: expanded.wrappedValue ? "chevron.down" : "chevron.right")
-                            .font(.caption).foregroundStyle(.primary)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityLabel("\(expanded.wrappedValue ? "Collapse" : "Expand") children of \(AgentOverview.title(terminal))")
-                    .accessibilityIdentifier("children-\(terminal.address)")
-                }
+                if large { familyControl }
             }
-            Spacer(minLength: 2)
-            Button { explaining = true } label: {
-                HStack(spacing: 6) {
-                    if preferences.fields.contains(.time), let since = terminal.statusSince {
-                        TimelineView(.periodic(from: .now, by: 30)) { date in
-                            Text(Terminal.shortAge(since, now: date.date))
-                                .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                        }
-                    }
-                    StatusDot(state: state.statusWord)
+        } trailing: {
+            // The end of a row has room to spare next to its lines: the family's control needs no
+            // line of its own there.
+            if !large {
+                VStack(alignment: .trailing, spacing: 0) {
+                    statusButton
+                    familyControl
                 }
-                .padding(.vertical, 4).contentShape(Rectangle())
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(.primary)
-            .accessibilityLabel(state.title)
-            .popover(isPresented: $explaining) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(state.explanation)
-                    if let since = terminal.statusSince {
-                        Text("Since \(since.formatted(.relative(presentation: .named)))").foregroundStyle(.secondary)
-                    }
-                }
-                .font(.callout).padding().presentationCompactAdaptation(.popover)
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(terminal.address)
     }
 
-    private var details: [String] {
-        let fields = preferences.fields
+    /// At accessibility sizes a column at the row's end would take the text's width: what's there
+    /// moves under the title.
+    private var large: Bool { typeSize.isAccessibilitySize }
+
+    /// The time and the dot, which explain themselves when tapped.
+    private var statusButton: some View {
+        Button { explaining = true } label: {
+            HStack(spacing: 6) {
+                if preferences.fields.contains(.time), let since = terminal.statusSince {
+                    TimelineView(.periodic(from: .now, by: 30)) { date in
+                        Text(Terminal.shortAge(since, now: date.date))
+                            .font(.caption.monospacedDigit()).foregroundStyle(Color.rowSecondary)
+                    }
+                }
+                StatusDot(state: state.statusWord)
+            }
+            .padding(.top, large ? 0 : SidebarMetrics.titleLineInset)
+            .frame(minWidth: SidebarMetrics.touchTarget, minHeight: SidebarMetrics.touchTarget,
+                   alignment: large ? .leading : .topTrailing)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(Color.rowPrimary)
+        .accessibilityLabel(state.title)
+        .popover(isPresented: $explaining) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(state.explanation)
+                if let since = terminal.statusSince {
+                    Text("Since \(since.formatted(.relative(presentation: .named)))").foregroundStyle(.secondary)
+                }
+            }
+            .font(.callout).padding().presentationCompactAdaptation(.popover)
+        }
+    }
+
+    /// Wraps at the separators: a hyphen inside a name like claude-code doesn't break. Not at
+    /// accessibility sizes, where such a name may not fit a line and has to break somewhere.
+    private func factLine(_ facts: [String]) -> some View {
+        let text = facts.joined(separator: Terminal.detailSeparator)
+        return Text(large ? text : text.replacingOccurrences(of: "-", with: "\u{2011}"))
+            .sidebarDetail()
+            .accessibilityLabel(text)
+    }
+
+    @ViewBuilder private var familyControl: some View {
+        if let expanded, childCount > 0 {
+            Button {
+                expanded.wrappedValue.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Text("\(childCount) \(childCount == 1 ? "child" : "children")")
+                        .font(.caption)
+                        .fixedSize()
+                    Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        // Room for the wider of the two chevrons, whatever the text size.
+                        .frame(minWidth: 12)
+                }
+                .foregroundStyle(Color.rowPrimary)
+                .frame(minHeight: SidebarMetrics.touchTarget)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("\(expanded.wrappedValue ? "Collapse" : "Expand") children of \(AgentOverview.title(terminal))")
+            .accessibilityIdentifier("children-\(terminal.address)")
+        }
+    }
+
+    private func enabled(_ field: AgentOverviewField, _ value: String?) -> String? {
+        guard preferences.fields.contains(field),
+              let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty
+        else { return nil }
+        return trimmed
+    }
+
+    private var message: String? { enabled(.message, terminal.status?.msg) }
+
+    private var directory: String? {
+        guard context.directory != parent?.directory else { return nil }
+        return enabled(.directory, context.directory.map { Terminal.abbreviate($0) })
+    }
+
+    /// Where it works; what its parent right above says isn't repeated. A space usually is the
+    /// project: once is enough.
+    private var contextLine: [String] {
+        var parts: [String] = []
         let values: [(AgentOverviewField, String?)] = [
-            (.space, space),
+            (.space, space == parent?.project ? nil : space),
+            (.project, context.project == parent?.project ? nil : context.project),
+            (.branch, context.branch == parent?.branch ? nil : context.branch),
+        ]
+        for case let part? in values.map({ enabled($0, $1) }) where !parts.contains(part) { parts.append(part) }
+        return parts
+    }
+
+    /// Who runs it, which stays on a child too.
+    private var identityLine: [String] {
+        let values: [(AgentOverviewField, String?)] = [
             (.name, terminal.status?.title?.isEmpty == false ? terminal.nameInSpace : nil),
-            (.message, terminal.status?.msg),
-            (.project, context.project), (.branch, context.branch),
-            (.directory, context.directory.map { Terminal.abbreviate($0) }),
             (.agent, context.agent), (.account, context.account),
         ]
-        var parts = values.compactMap { field, value -> String? in
-            guard fields.contains(field), let value else { return nil }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
+        let parts = values.compactMap { enabled($0, $1) }
         // The status remains readable even when every optional field is hidden.
-        if parts.isEmpty { parts = [state.title] }
+        if parts.isEmpty, contextLine.isEmpty, message == nil, directory == nil, parent == nil { return [state.title] }
         return parts
     }
 }
 
-/// Only bundled original assets are used; unknown providers get a neutral system symbol.
+/// Only bundled original assets are used; anything else gets a neutral system symbol. All of them
+/// share one tile, so the list keeps a calm column whichever programs are running.
 struct AgentProviderIcon: View {
     let terminal: Terminal
+    var neutralSymbol = "sparkles"
 
     private var provider: String {
         let raw = TerminalContext(terminal: terminal).agent ?? terminal.foreground?.name ?? terminal.argv.first ?? ""
@@ -123,18 +195,29 @@ struct AgentProviderIcon: View {
         }
     }
 
+    private static let shape = RoundedRectangle(cornerRadius: SidebarMetrics.iconRadius, style: .continuous)
+
     var body: some View {
-        Group {
+        ZStack {
+            Self.shape.fill(Color.rowFill)
             if let asset, let image = UIImage(named: asset) {
                 Image(uiImage: image)
                     .renderingMode(asset == "AgentIcon-Grok" ? .template : .original)
-                    .resizable().scaledToFit().foregroundStyle(.primary)
+                    .resizable().scaledToFit().foregroundStyle(Color.rowPrimary)
+                    // Codex's original is a tile itself; the others are marks to place on one.
+                    .padding(asset == "AgentIcon-Codex" ? 0 : 4)
             } else {
-                Image(systemName: "sparkles").foregroundStyle(.secondary)
+                // A fixed size like the tile's: at large text it would outgrow it.
+                Image(systemName: neutralSymbol)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.rowSecondary)
             }
+            Self.shape.strokeBorder(Color.rowFill, lineWidth: 1)
         }
-        .frame(width: 26, height: 26)
-        .accessibilityLabel(provider.isEmpty ? "Agent" : provider)
+        .frame(width: SidebarMetrics.iconSize, height: SidebarMetrics.iconSize)
+        .clipShape(Self.shape)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(asset == nil && neutralSymbol == "terminal" ? "Terminal" : provider.isEmpty ? "Agent" : provider)
     }
 }
 
