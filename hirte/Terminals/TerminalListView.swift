@@ -63,10 +63,12 @@ struct TerminalListView: View {
             .sheet(isPresented: $showingAgentSettings) {
                 NavigationStack {
                     AgentOverviewSettingsView()
+                        .accessibilityIdentifier("agent-overview-settings")
+                        // Keep the dismissal action reachable while scrolling the long form.
+                        .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Done") { showingAgentSettings = false }
-                            }
+                            Button("Done") { showingAgentSettings = false }
+                                .accessibilityIdentifier("agent-overview-done")
                         }
                 }
             }

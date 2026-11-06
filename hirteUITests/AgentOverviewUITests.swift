@@ -13,18 +13,23 @@ final class AgentOverviewUITests: XCTestCase {
         if app.buttons["Try the Demo"].waitForExistence(timeout: 3) { app.buttons["Try the Demo"].tap() }
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "t3").firstMatch.waitForExistence(timeout: 10))
         if app.buttons["Agents"].exists { app.buttons["Agents"].tap() }
-        let initialMenu = app.buttons["agent-overview-menu"]
-        initialMenu.tap()
+        openMenu(app)
         app.buttons["Customize Rows…"].tap()
+        let done = app.buttons["agent-overview-done"]
+        XCTAssertTrue(done.waitForExistence(timeout: 5))
+        XCTAssertTrue(done.isHittable)
+        let form = app.collectionViews["agent-overview-settings"]
         let initialReset = app.buttons["Reset to Defaults"]
-        for _ in 0..<5 where !initialReset.isHittable { app.swipeUp() }
+        for _ in 0..<5 where !initialReset.isHittable { form.swipeUp() }
+        XCTAssertTrue(initialReset.isHittable)
+        XCTAssertTrue(done.isHittable)
+        shot("overview-customize-scrolled-" + appearance)
         if initialReset.isEnabled { initialReset.tap() }
-        app.navigationBars["Agent Overview"].buttons["Done"].tap()
+        done.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
         shot("overview-individual-" + appearance)
 
-        let menu = app.buttons["agent-overview-menu"]
-        XCTAssertTrue(menu.waitForExistence(timeout: 5))
-        menu.tap()
+        openMenu(app)
         shot("overview-menu-" + appearance)
         XCTAssertTrue(app.buttons["Nested"].waitForExistence(timeout: 5))
         app.buttons["Nested"].tap()
@@ -33,25 +38,42 @@ final class AgentOverviewUITests: XCTestCase {
         app.buttons["children-t1"].tap()
         app.buttons["children-t1"].tap()
 
-        menu.tap()
+        openMenu(app)
         app.buttons["Customize Rows…"].tap()
         XCTAssertTrue(app.navigationBars["Agent Overview"].waitForExistence(timeout: 5))
         shot("overview-customize-" + appearance)
         let branch = app.switches["Branch"]
-        for _ in 0..<4 where !branch.isHittable { app.swipeUp() }
+        for _ in 0..<4 where !branch.isHittable { form.swipeUp() }
         XCTAssertTrue(branch.isHittable)
         XCTAssertEqual(branch.value as? String, "1")
         branch.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "0"), object: branch)], timeout: 3), .completed)
         let reset = app.buttons["Reset to Defaults"]
-        for _ in 0..<4 where !reset.isHittable { app.swipeUp() }
+        for _ in 0..<4 where !reset.isHittable { form.swipeUp() }
         XCTAssertTrue(reset.isHittable)
         reset.tap()
-        for _ in 0..<4 where !branch.isHittable { app.swipeDown() }
+        for _ in 0..<4 where !branch.isHittable { form.swipeDown() }
         XCTAssertEqual(branch.value as? String, "1")
-        app.navigationBars["Agent Overview"].buttons["Done"].tap()
-        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        XCTAssertTrue(done.isHittable)
+        done.tap()
+        XCTAssertTrue(done.waitForNonExistence(timeout: 5))
         shot("overview-reset-" + appearance)
+    }
+
+    @MainActor
+    private func openMenu(_ app: XCUIApplication) {
+        let menu = app.buttons["agent-overview-menu"]
+        if !menu.exists {
+            let more = app.buttons["TopOverflowBarButtonItem"].firstMatch
+            if more.exists { more.tap() }
+        }
+        if menu.waitForExistence(timeout: 2) {
+            menu.tap()
+        } else {
+            let item = app.buttons["View and Sort"]
+            XCTAssertTrue(item.waitForExistence(timeout: 3))
+            item.tap()
+        }
     }
 
     @MainActor
