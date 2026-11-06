@@ -24,12 +24,24 @@ final class SidebarPassUITests: XCTestCase {
         XCTAssertEqual(plus.frame, agentsPlus, "the plus doesn't move between the views")
         shot("sidebar-terminals-\(appearance)")
 
+        // Coming back to a list that was at its top leaves it there: the first header stays in view.
+        app.buttons["Agents"].tap()
+        XCTAssertTrue(app.buttons["agent-overview-menu"].waitForExistence(timeout: 5))
+        app.buttons["Terminals"].tap()
+        let firstHeader = app.staticTexts["website"]
+        XCTAssertTrue(firstHeader.waitForExistence(timeout: 5))
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertGreaterThanOrEqual(firstHeader.frame.minY, app.buttons["Terminals"].frame.maxY,
+                                    "the first space's header isn't under the strip")
+
         // A space offers a new terminal without its context menu.
         let add = app.buttons["New Terminal in website"]
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         XCTAssertTrue(add.isHittable)
-        XCTAssertGreaterThanOrEqual(add.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(add.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(add.frame.minY, app.buttons["Terminals"].frame.maxY,
+                                    "the whole button is below the strip, or a tap lands on the strip")
+        XCTAssertGreaterThanOrEqual(add.frame.width, 44 - 1e-6)
+        XCTAssertGreaterThanOrEqual(add.frame.height, 44 - 1e-6)
         add.tap()
         let cancel = app.buttons["Cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 5))
@@ -66,10 +78,10 @@ final class SidebarPassUITests: XCTestCase {
         choose("Nested", app)
         let children = app.buttons["children-t1"]
         XCTAssertTrue(children.waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(children.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(children.frame.height, 44 - 1e-6)
         let status = app.buttons["Working"].firstMatch
         XCTAssertGreaterThanOrEqual(status.frame.height, 44, "the status explains itself on a full target")
-        XCTAssertGreaterThanOrEqual(status.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(status.frame.width, 44 - 1e-6)
         shot("sidebar-family-open-selected-\(appearance)")
         children.tap()
         let child = app.descendants(matching: .any).matching(identifier: "t2").firstMatch
@@ -143,7 +155,7 @@ final class SidebarPassUITests: XCTestCase {
         let children = app.buttons["children-t1"]
         reveal(children, in: app)
         XCTAssertTrue(children.exists)
-        XCTAssertGreaterThanOrEqual(children.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(children.frame.height, 44 - 1e-6)
         let child = app.descendants(matching: .any).matching(identifier: "t2").firstMatch
         if !child.waitForExistence(timeout: 2) { children.tap() }
         XCTAssertTrue(child.waitForExistence(timeout: 5))

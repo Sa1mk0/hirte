@@ -7,6 +7,8 @@ struct RootView: View {
     @Environment(HostStore.self) private var hosts
     @Environment(KeyLibrary.self) private var keys
     @Environment(\.scenePhase) private var scenePhase
+    /// The window's: inside the split view's sidebar column it always reads compact.
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var sessions = SessionStore()
     @State private var windowID = UUID()
     @State private var pendingFollowRoute: FollowTask?
@@ -42,7 +44,8 @@ struct RootView: View {
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
-            SidebarView(sessions: sessions, selectedHost: selectedHost, selectedTerminal: $selectedTerminal)
+            SidebarView(sessions: sessions, selectedHost: selectedHost, selectedTerminal: $selectedTerminal,
+                        besideDetail: sizeClass == .regular)
                 // The detail column runs under the sidebar: its default material would take on the
                 // colors of what's selected.
                 .containerBackground(Color.sidebarBackground, for: .navigation)

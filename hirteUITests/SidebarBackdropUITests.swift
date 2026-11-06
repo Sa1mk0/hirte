@@ -31,12 +31,16 @@ final class SidebarBackdropUITests: XCTestCase {
                 let window = app.windows.firstMatch.frame
                 let blank = CGPoint(x: window.minX + 60, y: window.maxY - 60)
                 let detail = CGPoint(x: window.maxX - 60, y: window.maxY - 60)
+                // Left of the switch: the strip's own background.
+                let strip = CGPoint(x: window.minX + 8, y: terminals.frame.midY)
 
                 func read(_ step: String) -> ([UInt8], [UInt8]) {
                     Thread.sleep(forTimeInterval: 1)
                     let shot = XCUIScreen.main.screenshot()
                     let values = (color(at: blank, in: shot.image), color(at: detail, in: shot.image))
-                    print("SIDEBAR-PIXEL \(appearance) \(theme) \(step) sidebar=\(values.0) detail=\(values.1)")
+                    let stripColor = color(at: strip, in: shot.image)
+                    print("SIDEBAR-PIXEL \(appearance) \(theme) \(step) sidebar=\(values.0) strip=\(stripColor) detail=\(values.1)")
+                    XCTAssertEqual(stripColor, values.0, "the strip on top of the list matches the sidebar")
                     save(shot, "backdrop-\(appearance)-\(theme)-\(step)")
                     return values
                 }

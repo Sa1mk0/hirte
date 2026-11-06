@@ -7,6 +7,8 @@ struct TerminalListView: View {
     @Environment(KeyLibrary.self) private var keys
     let session: HostSession
     @Binding var selection: String?
+    /// A column next to the detail: the strip on top matches its backdrop, not a stack's list.
+    let besideDetail: Bool
     @AppStorage("terminals.view") private var mode = Mode.agents
     /// The rows each view had on screen, so switching back scrolls to where it was.
     @State private var visibleRows: [Mode: Set<String>] = [:]
@@ -26,7 +28,6 @@ struct TerminalListView: View {
     @AppStorage("terminals.collapsed") private var collapsed = ""
     @AppStorage(AgentOverviewPreferences.storageKey) private var overviewStored = ""
     @State private var showingAgentSettings = false
-    @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.dynamicTypeSize) private var typeSize
 
     private var overview: AgentOverviewPreferences { .init(rawValue: overviewStored) }
@@ -296,9 +297,11 @@ struct TerminalListView: View {
                 .onChange(of: mode) { _, mode in
                     restoring = mode
                     let seen = visibleRows[mode] ?? []
-                    let top = rowOrder(mode).first { seen.contains($0) }
-                    // At the top already: nothing to hide.
-                    concealed = top != nil && top != rowOrder(mode).first
+                    let order = rowOrder(mode)
+                    // At the top already: nothing to hide, nor to scroll, which would put the first
+                    // row where its section's header belongs.
+                    let top = order.first { seen.contains($0) }.flatMap { $0 == order.first ? nil : $0 }
+                    concealed = top != nil
                     Task { @MainActor in
                         // The new list lays out its rows first.
                         try? await Task.sleep(for: .milliseconds(30))
@@ -326,7 +329,7 @@ struct TerminalListView: View {
             }
             }
             .padding(.horizontal, 16)
-            .background(sizeClass == .compact ? Color(uiColor: .systemGroupedBackground) : Color.sidebarBackground)
+            .background(besideDetail ? Color.sidebarBackground : Color(uiColor: .systemGroupedBackground))
         }
     }
 

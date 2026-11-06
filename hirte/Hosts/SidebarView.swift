@@ -9,13 +9,15 @@ struct SidebarView: View {
     let sessions: SessionStore
     @Binding var selectedHost: Host.ID?
     @Binding var selectedTerminal: String?
+    /// A column next to the detail, not a stack of its own.
+    let besideDetail: Bool
     @State private var showingMachines = false
     @State private var showingSettings = false
     @State private var editing: Host?
 
     var body: some View {
         if let host = hosts.hosts.first(where: { $0.id == selectedHost }) {
-            TerminalListView(session: sessions.session(for: host), selection: $selectedTerminal)
+            TerminalListView(session: sessions.session(for: host), selection: $selectedTerminal, besideDetail: besideDetail)
                 .id(host.id)
                 // iOS only shows a title menu (name + chevron) on an inline title.
                 .navigationBarTitleDisplayMode(.inline)
