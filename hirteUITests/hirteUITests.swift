@@ -342,7 +342,7 @@ final class DemoTourTests: XCTestCase {
         let watching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Watching'")).firstMatch
         XCTAssertTrue(watching.waitForExistence(timeout: 5), "the terminal opens watching")
         shot(app, "preview-1-watch")
-        back(app)
+        backIfStacked(app)
         // Next to the lists it's still selected, and selecting it again wouldn't open it anew.
         if app.buttons["Hide Sidebar"].exists { open(app, "t4") }
         open(app, "t5")
@@ -416,7 +416,7 @@ final class DemoTourTests: XCTestCase {
         // Looking at it reads it: it moves to Idle, which starts collapsed.
         open(app, "t6")
         sleep(2)
-        back(app)
+        backIfStacked(app)
         // Next to the lists it stays open, and held under Done, until another one is opened.
         if app.buttons["Hide Sidebar"].exists { open(app, "t3") }
         let idle = section("idle")
@@ -468,7 +468,9 @@ final class DemoTourTests: XCTestCase {
     @MainActor
     func testViewsKeepScrollPosition() throws {
         let app = XCUIApplication()
-        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityL"]
+        // No sections folded away by an earlier test: the last terminal is what it scrolls to.
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityL",
+                                "-terminals.collapsed", ""]
         app.launch()
         startDemo(app)
         app.buttons["Terminals"].tap()

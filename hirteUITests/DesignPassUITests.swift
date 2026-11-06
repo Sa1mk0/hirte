@@ -122,6 +122,41 @@ final class DesignPassUITests: XCTestCase {
         shot("no-icon-no-time")
     }
 
+    /// Selecting a row moves nothing: titles close to wrapping keep their lines, in both views.
+    @MainActor
+    func testSelectionKeepsRowHeights() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = launch(fields: Self.defaultFields, mode: "individual", view: "agents", dense: true)
+        try XCTSkipUnless(app.buttons["Hide Sidebar"].waitForExistence(timeout: 5), "only next to the detail")
+        let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
+        func check(_ addresses: [String]) {
+            var heights: [String: CGFloat] = [:]
+            for address in addresses {
+                reveal(row(address, app), app)
+                heights[address] = row(address, app).frame.height
+            }
+            for address in addresses {
+                reveal(row(address, app), app)
+                row(address, app).tap()
+                XCTAssertTrue(screen.waitForExistence(timeout: 10), "\(address) attaches")
+                Thread.sleep(forTimeInterval: 0.5)
+                XCTAssertTrue(row(address, app).isSelected, "\(address) is selected")
+                for other in addresses where row(other, app).exists {
+                    XCTAssertEqual(row(other, app).frame.height, heights[other] ?? 0, accuracy: 1,
+                                   "\(other) keeps its height with \(address) selected")
+                }
+                print("DESIGN-HEIGHT \(address) \(heights[address] ?? 0) -> \(row(address, app).frame.height)")
+            }
+        }
+        // Working or waiting: they stay in their sections when looked at, done ones move on.
+        check(["t2", "t13", "t1", "t8", "t6", "t10", "t7"])
+        shot("heights-agents")
+        app.buttons["Terminals"].tap()
+        Thread.sleep(forTimeInterval: 1)
+        check(["t1", "t11", "t10", "t18", "t13"])
+        shot("heights-terminals")
+    }
+
     /// A selected row under a finger: what the list draws for a swipe and for a long press.
     @MainActor
     func testCaptureRowInteractions() throws {
@@ -226,8 +261,13 @@ final class DesignPassUITests: XCTestCase {
             return inView()
         }
         var swipes = 0
+        // Down the list first, then back up: a view returns to where it was left.
         while swipes < 12, !settledInView() {
-            app.collectionViews.firstMatch.swipeUp(velocity: .slow)
+            if swipes < 5 {
+                app.collectionViews.firstMatch.swipeUp(velocity: .slow)
+            } else {
+                app.collectionViews.firstMatch.swipeDown(velocity: .slow)
+            }
             Thread.sleep(forTimeInterval: 0.3)
             swipes += 1
         }
@@ -276,7 +316,7 @@ final class DesignPassUITests: XCTestCase {
                        "runs as \(title): \(menu.label)")
         let waiting = row(dense ? "t10" : "t3", app)
         XCTAssertTrue(waiting.waitForExistence(timeout: 10))
-        let swipes = reveal(waiting, app)
+        let swipes = min(reveal(waiting, app), 5)
         XCTAssertEqual(waiting.staticTexts["npm run migrate"].exists, fields.contains("message"),
                        "the status message follows its field")
         XCTAssertEqual(row("t10", app).exists, dense, "dense data only when asked for")

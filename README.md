@@ -60,48 +60,45 @@ just test      # HerdrKit tests
 To run it on your own iPhone, sign with your team: set `HIRTE_TEAM` and `HIRTE_BUNDLE_ID_PREFIX`
 in `.envrc.local` (see `.envrc`), then `just phone`. `just` lists the other commands.
 
-### Lokal testen
+### Testing locally
 
-`just sim` baut Hirte Dev und startet die App im Simulator über die zu Xcode gehörende
-DeviceHub-App. Standard ist „iPhone 17 Pro“; mit `HIRTE_SIMULATOR="Gerätename" just sim`
-lässt sich ein anderer installierter Simulator wählen. Unter Settings → Add Demo Machine
-kannst du die Oberfläche ohne SSH-Host ausprobieren. `just test` führt die HerdrKit-Tests aus.
+`just sim` builds Hirte Dev and launches it in the simulator through Xcode's DeviceHub app.
+The default is "iPhone 17 Pro"; use `HIRTE_SIMULATOR="Device name" just sim` to select another
+installed simulator. Open Settings → Add Demo Machine to try the interface without an SSH host.
+`just test` runs the HerdrKit tests. The debug launch arguments `-hirte.demo YES -hirte.demo.dense YES`
+open a denser demo with nested families, long branches and a separate worktree path.
 
-Die Umschaltung zwischen Agents und Terminals sowie „+“ liegen in der unteren Glasleiste.
-Auf dem Phone zeigt der Terminalkopf Aufgabe und Kontext; Tastatur, Live Activity und Info
-findest du im Menü „More“. „Watch Only“ bleibt direkt erreichbar.
+The bottom glass bar contains the Agents/Terminals switch and "+". On a phone, the terminal header
+shows its task and context; More contains keyboard, Live Activity and info actions. Watch Only
+remains directly accessible.
 
-Unter Settings → Agents → Agent Overview kannst du die Zeilenfelder mit Vorschau anpassen;
-Titel und Status bleiben sichtbar, fehlende Kontextwerte werden ausgeblendet. Das zusätzliche
-Menü „View and Sort“ in der Agentenübersicht bietet „Individual“ und „Nested“ sowie die
-Sortierung. In Settings → Light Theme / Dark Theme findest du die Theme-Galerie; über „+“
-kannst du Ghostty-Theme-Text einfügen oder eine Datei importieren und vor dem Speichern
-prüfen. Die gebündelte Symbols Nerd Font Mono dient als Fallback für Nerd-Font-Symbole
-im Terminal; die ausgewählte Textschrift bleibt erhalten.
+Settings → Agents → Agent Overview lets you choose row fields with a live preview. Title and status
+remain visible, and missing context values are omitted. View and Sort in the agent overview provides
+Individual/Nested modes and sorting. Settings → Light Theme / Dark Theme opens the theme gallery;
+use "+" to paste Ghostty theme text or import a file and review it before saving. Bundled Symbols Nerd
+Font Mono supplies fallback Nerd Font symbols in the terminal while keeping the selected text font.
 
-Live Activities sind lokal und optional: Aktiviere unter Settings → Live Activity „Follow on
-Lock Screen (Beta)“ und wähle im Terminalmenü einen arbeitenden Agenten zum Folgen aus.
-Aktualisierungen erfolgen, solange Hirte geöffnet und verbunden ist; im Hintergrund oder bei
-Verbindungsverlust bleibt der zuletzt bekannte Stand sichtbar. Öffne Hirte zum Aktualisieren.
-Die Anzeige bietet keine verlässliche Hintergrundüberwachung.
+Live Activities are local and optional: enable Settings → Live Activity → "Follow on Lock Screen
+(Beta)", then follow a working agent from the terminal menu. Updates arrive while Hirte is open and
+connected. In the background or after a connection loss, the last known state remains visible;
+reopen Hirte to refresh it. This version does not provide reliable background monitoring.
 
-### Optionaler Host-Kontext
+### Optional host context
 
-Auf dem Host mit dem bestehenden herdr-core, `hc`, `git` und Python 3 kannst du den Kontext
-eines freigegebenen lokalen Terminals über Labels bereitstellen:
+On a host with the existing herdr-core, `hc`, `git` and Python 3, publish context for a chosen local
+terminal through labels:
 
 ```sh
 python3 scripts/publish-context.py --terminal t7
 python3 scripts/publish-context.py --terminal t7 --watch
 ```
 
-Ersetze `t7` durch die lokale Terminaladresse aus `hc ls`; `--terminal` lässt sich wiederholen.
-Ohne `--watch` wird einmal aktualisiert, mit `--watch` regelmäßig bis zum Abbruch mit Ctrl-C.
-Die fünf Anzeigewerte sind Branch, Projekt, Verzeichnis, Agent und Account; ein zusätzlicher
-Erstellungszeitstempel ordnet sie der Terminalinstanz zu. Account ist ein lesbarer Profilalias,
-kein Zugangsschlüssel. Das Skript veröffentlicht keine Secrets und braucht keine Registrierung
-bei GitHub. Die Labels erreichen Hirte über die bestehende Host-Verbindung; fehlende Werte
-bleiben in der Übersicht ausgeblendet.
+Replace `t7` with its local terminal address from `hc ls`; `--terminal` can be repeated. Without
+`--watch`, the script publishes once. With `--watch`, it refreshes until stopped with Ctrl-C.
+The five display fields are branch, project, directory, agent and account. An additional creation
+timestamp binds them to the terminal instance. Account is a readable profile alias, not a credential.
+The publisher needs no GitHub registration. Labels reach Hirte over the existing host connection;
+missing values are omitted from the overview.
 
 ## License
 

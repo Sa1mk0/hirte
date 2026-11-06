@@ -66,8 +66,6 @@ struct SidebarRowBackground: View {
 }
 
 extension EnvironmentValues {
-    /// This row's terminal is what the detail shows.
-    @Entry var sidebarRowSelected = false
     /// The list is a column next to the detail: a row's title may take a second line.
     @Entry var sidebarBesideDetail = false
 }

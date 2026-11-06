@@ -147,7 +147,6 @@ struct TerminalListView: View {
         let selected = besideDetail && selection == terminal.address
         return row
             .background { if besideDetail { RowFocusEffectRemover() } }
-            .environment(\.sidebarRowSelected, selected)
             .environment(\.sidebarBesideDetail, besideDetail)
             .tag(terminal.address)
             .modifier(actions)

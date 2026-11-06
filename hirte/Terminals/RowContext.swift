@@ -221,7 +221,6 @@ struct RowHead<Accessory: View>: View {
     let context: RowContext
     @ViewBuilder var accessory: Accessory
     @Environment(\.dynamicTypeSize) private var typeSize
-    @Environment(\.sidebarRowSelected) private var selected
     @Environment(\.sidebarBesideDetail) private var besideDetail
 
     /// A question that waits for you isn't cut short, on any row.
@@ -230,7 +229,8 @@ struct RowHead<Accessory: View>: View {
     private func titleText(limit: Int?) -> some View {
         Text(title)
             .font(compact ? .subheadline : .body)
-            .fontWeight(emphasized || selected ? .semibold : .regular)
+            // Only what waits for you: selecting a row mustn't rewrap its title, or the list moves.
+            .fontWeight(emphasized ? .semibold : .regular)
             .foregroundStyle(dimmed ? Color.rowSecondary : Color.rowPrimary)
             .lineLimit(limit)
     }
