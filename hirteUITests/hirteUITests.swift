@@ -602,7 +602,8 @@ final class DemoTourTests: XCTestCase {
 
     @MainActor
     private func shot(_ app: XCUIApplication, _ name: String) {
-        let screenshot = app.screenshot()
+        // Include the display context for floating iPad windows and rotated scenes.
+        let screenshot = XCUIScreen.main.screenshot()
         let attachment = XCTAttachment(screenshot: screenshot)
         attachment.name = name
         attachment.lifetime = .keepAlways
