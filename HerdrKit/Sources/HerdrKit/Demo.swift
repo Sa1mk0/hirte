@@ -7,10 +7,10 @@ public final class DemoCore: ByteTransport {
     public let incoming: AsyncThrowingStream<Data, Error>
     private let engine: DemoEngine
 
-    public init() {
+    public init(scene: DemoScene = .standard) {
         let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
         incoming = stream
-        engine = DemoEngine(output: continuation)
+        engine = DemoEngine(output: continuation, scene: scene)
     }
 
     public func send(_ data: Data) async throws {
@@ -24,8 +24,8 @@ public final class DemoCore: ByteTransport {
 
 extension HerdrClient {
     /// Connects to an in-app `DemoCore`.
-    public static func connectDemo() async throws -> HerdrClient {
-        try await connect(over: DemoCore())
+    public static func connectDemo(scene: DemoScene = .standard) async throws -> HerdrClient {
+        try await connect(over: DemoCore(scene: scene))
     }
 }
 
@@ -37,11 +37,13 @@ private actor DemoEngine {
     private var framed = false
     private var closed = false
 
-    private var terminals = DemoScript.terminals()
-    private var roles = DemoScript.roles
+    private var terminals: [DemoTerminal]
+    private var roles: [String: DemoScript.Role]
+    private let layout: String
+    private let timeline: [DemoScript.Step]
     private var seq: UInt64 = 100
     private var nextChannel: UInt32 = 1
-    private var nextTerminal = 8
+    private var nextTerminal: Int
 
     private var eventChannels: Set<UInt32> = []
     private var views: [UInt32: View] = [:]
@@ -56,8 +58,22 @@ private actor DemoEngine {
         var line = ""
     }
 
-    init(output: AsyncThrowingStream<Data, Error>.Continuation) {
+    init(output: AsyncThrowingStream<Data, Error>.Continuation, scene: DemoScene) {
         self.output = output
+        switch scene {
+        case .standard:
+            terminals = DemoScript.terminals()
+            roles = DemoScript.roles
+            layout = DemoScript.layout
+            timeline = DemoScript.timeline
+        case .dense:
+            terminals = DemoDenseScript.terminals()
+            roles = DemoDenseScript.roles()
+            layout = DemoDenseScript.layout
+            timeline = []
+        }
+        // After the scene's own addresses: "t8" follows the standard scene's seven.
+        nextTerminal = terminals.compactMap { Int($0.address.dropFirst()) }.max().map { $0 + 1 } ?? 1
     }
 
     func shutdown() {
@@ -138,7 +154,7 @@ private actor DemoEngine {
 
         case "doc.get":
             let name = params["name"] as? String
-            let value = name == HerdrAppLayout.documentName ? DemoScript.layout : "null"
+            let value = name == HerdrAppLayout.documentName ? layout : "null"
             let version = name == HerdrAppLayout.documentName ? 1 : 0
             return (Data(#"{"value":\#(value),"version":\#(version)}"#.utf8), nil)
 
@@ -392,7 +408,7 @@ private actor DemoEngine {
         guard clock == nil else { return }
         clock = Task { [weak self] in
             var elapsed: Duration = .zero
-            var steps = DemoScript.timeline
+            var steps = await self?.timeline ?? []
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(1))
                 elapsed += .seconds(1)

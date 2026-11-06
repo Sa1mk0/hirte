@@ -1,7 +1,7 @@
 import XCTest
 
-/// The sidebar's two views as the UI/UX pass left them: what a terminal row says, stable header
-/// actions and readable controls. Screenshots go to `TEST_RUNNER_HIRTE_SHOTS`.
+/// The sidebar's two views as the UI/UX pass left them: what a terminal row says, stable bar and
+/// header actions and readable controls. Screenshots go to `TEST_RUNNER_HIRTE_SHOTS`.
 final class SidebarPassUITests: XCTestCase {
     private var appearance: String { ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "dark" }
 
@@ -13,7 +13,9 @@ final class SidebarPassUITests: XCTestCase {
         let app = launch()
         let plus = app.buttons["New Terminal"]
         XCTAssertTrue(plus.waitForExistence(timeout: 10))
-        XCTAssertTrue(plus.isHittable, "on the toolbar itself in the Agents view")
+        XCTAssertTrue(plus.isHittable, "in the bar over the list in the Agents view")
+        XCTAssertGreaterThanOrEqual(plus.frame.width, 44 - 1e-6)
+        XCTAssertGreaterThanOrEqual(plus.frame.height, 44 - 1e-6)
         let agentsPlus = plus.frame
 
         app.buttons["Terminals"].tap()
@@ -31,15 +33,16 @@ final class SidebarPassUITests: XCTestCase {
         let firstHeader = app.staticTexts["website"]
         XCTAssertTrue(firstHeader.waitForExistence(timeout: 5))
         Thread.sleep(forTimeInterval: 0.5)
-        XCTAssertGreaterThanOrEqual(firstHeader.frame.minY, app.buttons["Terminals"].frame.maxY,
-                                    "the first space's header isn't under the strip")
+        XCTAssertGreaterThanOrEqual(firstHeader.frame.minY, app.sidebarTitleBottom,
+                                    "the first space's header isn't under the title")
 
         // A space offers a new terminal without its context menu.
         let add = app.buttons["New Terminal in website"]
         XCTAssertTrue(add.waitForExistence(timeout: 5))
         XCTAssertTrue(add.isHittable)
-        XCTAssertGreaterThanOrEqual(add.frame.minY, app.buttons["Terminals"].frame.maxY,
-                                    "the whole button is below the strip, or a tap lands on the strip")
+        XCTAssertGreaterThanOrEqual(add.frame.minY, app.sidebarTitleBottom,
+                                    "the whole button is below the title, or a tap lands on the bar above")
+        XCTAssertLessThanOrEqual(add.frame.maxY, app.modeBarTop, "and above the bar below")
         XCTAssertGreaterThanOrEqual(add.frame.width, 44 - 1e-6)
         XCTAssertGreaterThanOrEqual(add.frame.height, 44 - 1e-6)
         add.tap()
@@ -79,6 +82,7 @@ final class SidebarPassUITests: XCTestCase {
         let children = app.buttons["children-t1"]
         XCTAssertTrue(children.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(children.frame.height, 44 - 1e-6)
+        XCTAssertGreaterThanOrEqual(children.frame.width, 44 - 1e-6)
         let status = app.buttons["Working"].firstMatch
         XCTAssertGreaterThanOrEqual(status.frame.height, 44, "the status explains itself on a full target")
         XCTAssertGreaterThanOrEqual(status.frame.width, 44 - 1e-6)
@@ -151,7 +155,6 @@ final class SidebarPassUITests: XCTestCase {
         app = launch(textSize: "UICTContentSizeCategoryAccessibilityXL")
         let besideTerminal = app.buttons["Hide Sidebar"].waitForExistence(timeout: 5)
         shot("sidebar-many-large-top-\(appearance)")
-        let strip = app.buttons["agent-overview-menu"]
         let children = app.buttons["children-t1"]
         reveal(children, in: app)
         XCTAssertTrue(children.exists)
@@ -163,17 +166,14 @@ final class SidebarPassUITests: XCTestCase {
         // The line itself, not just some part of the child, has to come into view.
         let identity = child.staticTexts.matching(NSPredicate(format: "label ENDSWITH 'Work'")).firstMatch
         reveal(identity, in: app)
-        // Hittable can still mean below the window's edge: the shot has to show the whole line.
-        let window = app.windows.firstMatch.frame
-        for _ in 0..<4 where identity.frame.maxY > window.maxY - 16 {
+        // Hittable can still mean under the bar: the shot has to show the whole line.
+        for _ in 0..<4 where identity.frame.maxY > app.modeBarTop {
             app.collectionViews.firstMatch.swipeUp(velocity: .slow)
         }
         XCTAssertTrue(identity.isHittable, "provider and account stay on a child")
-        XCTAssertLessThanOrEqual(identity.frame.maxY, window.maxY, "the whole line is in the window")
+        XCTAssertLessThanOrEqual(identity.frame.maxY, app.modeBarTop, "the whole line is above the bar")
+        XCTAssertTrue(app.buttons["New Terminal"].isHittable, "the bar stays usable at this size")
         shot("sidebar-many-large-child-\(appearance)")
-        // Rows are scrolled under the wrapped strip now: nothing of them shows through its lower edge.
-        let edge = stripEdgeColors(below: strip.frame)
-        XCTAssertEqual(edge.count, 1, "the strip's background is opaque: \(edge)")
         if besideTerminal {
             identity.tap()
             shot("sidebar-many-large-child-selected-\(appearance)")
@@ -188,20 +188,6 @@ final class SidebarPassUITests: XCTestCase {
         resetRows(app)
     }
 
-    /// The colors along a line just below the strip's control, inside its background.
-    private func stripEdgeColors(below frame: CGRect) -> Set<[UInt8]> {
-        let image = XCUIScreen.main.screenshot().image
-        guard let cgImage = image.cgImage, let data = cgImage.dataProvider?.data,
-              let bytes = CFDataGetBytePtr(data) else { return [] }
-        let y = Int((frame.maxY + 4) * image.scale)
-        var colors: Set<[UInt8]> = []
-        for x in stride(from: Int(frame.minX * image.scale), to: Int(frame.maxX * image.scale), by: 4) {
-            let offset = y * cgImage.bytesPerRow + x * cgImage.bitsPerPixel / 8
-            colors.insert([bytes[offset], bytes[offset + 1], bytes[offset + 2]])
-        }
-        return colors
-    }
-
     /// Picks an agent view from the menu and waits until the list shows it.
     @MainActor
     private func choose(_ mode: String, _ app: XCUIApplication) {
@@ -212,8 +198,9 @@ final class SidebarPassUITests: XCTestCase {
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         item.tap()
         XCTAssertTrue(item.waitForNonExistence(timeout: 5), "the menu closes")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "\(mode) · ")).firstMatch
-            .waitForExistence(timeout: 5), "the list shows \(mode)")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", ": \(mode),"), object: menu)], timeout: 5), .completed,
+                       "the list shows \(mode)")
     }
 
     @MainActor

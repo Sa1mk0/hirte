@@ -29,18 +29,19 @@ final class SidebarBackdropUITests: XCTestCase {
                 XCTAssertTrue(live.waitForExistence(timeout: 5))
                 let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
                 let window = app.windows.firstMatch.frame
-                let blank = CGPoint(x: window.minX + 60, y: window.maxY - 60)
+                // Above the bar that floats over the list's end, below the last row.
+                let blank = CGPoint(x: window.minX + 60, y: terminals.frame.minY - 40)
                 let detail = CGPoint(x: window.maxX - 60, y: window.maxY - 60)
-                // Left of the switch: the strip's own background.
-                let strip = CGPoint(x: window.minX + 8, y: terminals.frame.midY)
+                // In the column's margin, beside the rows and whatever fills them.
+                let margin = CGPoint(x: window.minX + 4, y: window.midY)
 
                 func read(_ step: String) -> ([UInt8], [UInt8]) {
                     Thread.sleep(forTimeInterval: 1)
                     let shot = XCUIScreen.main.screenshot()
                     let values = (color(at: blank, in: shot.image), color(at: detail, in: shot.image))
-                    let stripColor = color(at: strip, in: shot.image)
-                    print("SIDEBAR-PIXEL \(appearance) \(theme) \(step) sidebar=\(values.0) strip=\(stripColor) detail=\(values.1)")
-                    XCTAssertEqual(stripColor, values.0, "the strip on top of the list matches the sidebar")
+                    let marginColor = color(at: margin, in: shot.image)
+                    print("SIDEBAR-PIXEL \(appearance) \(theme) \(step) sidebar=\(values.0) margin=\(marginColor) detail=\(values.1)")
+                    XCTAssertEqual(marginColor, values.0, "the column has one background, top to bottom")
                     save(shot, "backdrop-\(appearance)-\(theme)-\(step)")
                     return values
                 }

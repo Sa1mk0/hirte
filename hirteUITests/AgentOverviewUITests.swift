@@ -123,8 +123,9 @@ final class AgentOverviewUITests: XCTestCase {
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         item.tap()
         XCTAssertTrue(item.waitForNonExistence(timeout: 5), "the menu closes")
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "\(mode) · ")).firstMatch
-            .waitForExistence(timeout: 5), "the list shows \(mode)")
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label CONTAINS %@", ": \(mode),"),
+            object: app.buttons["agent-overview-menu"])], timeout: 5), .completed, "the list shows \(mode)")
     }
 
     @MainActor
@@ -137,7 +138,7 @@ final class AgentOverviewUITests: XCTestCase {
         if menu.waitForExistence(timeout: 2) {
             menu.tap()
         } else {
-            let item = app.buttons["View and Sort"]
+            let item = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'View and Sort'")).firstMatch
             XCTAssertTrue(item.waitForExistence(timeout: 3))
             item.tap()
         }

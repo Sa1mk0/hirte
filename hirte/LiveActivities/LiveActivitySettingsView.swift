@@ -30,31 +30,61 @@ struct LiveActivitySettingsView: View {
 struct LiveActivityFollowMenu: View {
     let session: HostSession
     let terminal: HerdrKit.Terminal?
+    @Binding var showingSettings: Bool
     @Bindable private var follow = FollowController.shared
-    @State private var showingSettings = false
 
     var body: some View {
         let following = follow.follows(hostID: session.host.id, address: terminal?.address ?? "")
         Menu("Lock Screen", systemImage: following ? "lock.rectangle.fill" : "lock.rectangle") {
-            if following {
-                Button("Stop Following", role: .destructive) { follow.stop() }
-            } else if follow.enabled, follow.isAvailable, let terminal, FollowTask.canFollow(terminal) {
-                Button("Follow on Lock Screen") { follow.start(session: session, terminal: terminal) }
-                    .disabled(session.state != .connected)
-            }
-            Button("Live Activity Settings…") { showingSettings = true }
+            LiveActivityFollowActions(session: session, terminal: terminal, showingSettings: $showingSettings)
         }
         .accessibilityValue(following ? "Following" : "")
-        .sheet(isPresented: $showingSettings) {
-            NavigationStack {
-                Form { LiveActivitySettingsView() }
-                    .navigationTitle("Live Activity")
-                    .toolbar { Button("Done") { showingSettings = false } }
-            }
+    }
+}
+
+/// What the Lock Screen offers for a terminal: for a menu of their own, or a section of another menu.
+/// (As a submenu of one, a status update arriving while it's open could lose the tap that opens it.)
+struct LiveActivityFollowActions: View {
+    let session: HostSession
+    let terminal: HerdrKit.Terminal?
+    /// Held outside: inside a menu, this view's own sheet could not present.
+    @Binding var showingSettings: Bool
+    @Bindable private var follow = FollowController.shared
+
+    var body: some View {
+        if follow.follows(hostID: session.host.id, address: terminal?.address ?? "") {
+            Button("Stop Following", role: .destructive) { follow.stop() }
+        } else if follow.enabled, follow.isAvailable, let terminal, FollowTask.canFollow(terminal) {
+            Button("Follow on Lock Screen") { follow.start(session: session, terminal: terminal) }
+                .disabled(session.state != .connected)
         }
-        .alert("Live Activity", isPresented: Binding(
-            get: { follow.errorMessage != nil }, set: { if !$0 { follow.dismissError() } })) {
-                Button("OK") { follow.dismissError() }
-        } message: { Text(follow.errorMessage ?? "") }
+        Button("Live Activity Settings…") { showingSettings = true }
+    }
+}
+
+private struct LiveActivityFollowPresentation: ViewModifier {
+    @Binding var showingSettings: Bool
+    @Bindable private var follow = FollowController.shared
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $showingSettings) {
+                NavigationStack {
+                    Form { LiveActivitySettingsView() }
+                        .navigationTitle("Live Activity")
+                        .toolbar { Button("Done") { showingSettings = false } }
+                }
+            }
+            .alert("Live Activity", isPresented: Binding(
+                get: { follow.errorMessage != nil }, set: { if !$0 { follow.dismissError() } })) {
+                    Button("OK") { follow.dismissError() }
+            } message: { Text(follow.errorMessage ?? "") }
+    }
+}
+
+extension View {
+    /// What `LiveActivityFollowMenu` opens.
+    func liveActivityFollowPresentation(showingSettings: Binding<Bool>) -> some View {
+        modifier(LiveActivityFollowPresentation(showingSettings: showingSettings))
     }
 }

@@ -67,6 +67,10 @@ DeviceHub-App. Standard ist „iPhone 17 Pro“; mit `HIRTE_SIMULATOR="Gerätena
 lässt sich ein anderer installierter Simulator wählen. Unter Settings → Add Demo Machine
 kannst du die Oberfläche ohne SSH-Host ausprobieren. `just test` führt die HerdrKit-Tests aus.
 
+Die Umschaltung zwischen Agents und Terminals sowie „+“ liegen in der unteren Glasleiste.
+Auf dem Phone zeigt der Terminalkopf Aufgabe und Kontext; Tastatur, Live Activity und Info
+findest du im Menü „More“. „Watch Only“ bleibt direkt erreichbar.
+
 Unter Settings → Agents → Agent Overview kannst du die Zeilenfelder mit Vorschau anpassen;
 Titel und Status bleiben sichtbar, fehlende Kontextwerte werden ausgeblendet. Das zusätzliche
 Menü „View and Sort“ in der Agentenübersicht bietet „Individual“ und „Nested“ sowie die

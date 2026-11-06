@@ -12,9 +12,7 @@ final class LiveActivityUITests: XCTestCase {
         let row = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
-        let menu = app.buttons["Lock Screen"]
-        XCTAssertTrue(menu.waitForExistence(timeout: 10))
-        menu.tap()
+        openLockScreenMenu(app, timeout: 10)
         app.buttons["Live Activity Settings…"].tap()
         let enabled = app.switches["Follow on Lock Screen (Beta)"]
         XCTAssertTrue(enabled.waitForExistence(timeout: 5))
@@ -27,21 +25,31 @@ final class LiveActivityUITests: XCTestCase {
         if title.value as? String == "1" { toggle(title) }
         shot("live-activity-settings-" + appearance)
         app.navigationBars["Live Activity"].buttons["Done"].tap()
-        menu.tap()
+        openLockScreenMenu(app)
         let follow = app.buttons["Follow on Lock Screen"]
         XCTAssertTrue(follow.waitForExistence(timeout: 5))
         follow.tap()
-        menu.tap()
+        openLockScreenMenu(app)
         let stop = app.buttons["Stop Following"]
         XCTAssertTrue(stop.waitForExistence(timeout: 5))
         shot("live-activity-following-" + appearance)
         stop.tap()
-        menu.tap()
+        openLockScreenMenu(app)
         XCTAssertTrue(follow.waitForExistence(timeout: 5))
         app.buttons["Live Activity Settings…"].tap()
         toggle(enabled)
         XCTAssertEqual(enabled.value as? String, "0")
         app.navigationBars["Live Activity"].buttons["Done"].tap()
+    }
+
+    /// A menu in the toolbar next to the lists, a section of More on a phone.
+    @MainActor
+    private func openLockScreenMenu(_ app: XCUIApplication, timeout: TimeInterval = 5) {
+        let more = app.buttons["More"]
+        let menu = app.buttons["Lock Screen"]
+        XCTAssertTrue(menu.exists || more.waitForExistence(timeout: timeout), "the terminal's actions show")
+        if more.exists { app.openMore() } else { menu.tap() }
+        XCTAssertTrue(app.buttons["Live Activity Settings…"].waitForExistence(timeout: 5), "its actions show")
     }
 
     @MainActor

@@ -194,7 +194,12 @@ final class HostSession {
     private func connectOnce(keys: KeyLibrary) async throws {
         if host.isDemo {
             state = .connecting("Starting the demo…")
-            let client = try await HerdrClient.connectDemo()
+            var scene = DemoScene.standard
+            #if DEBUG
+            // `-hirte.demo.dense YES` (design checks): many agents and families, standing still.
+            if UserDefaults.standard.bool(forKey: "hirte.demo.dense") { scene = .dense }
+            #endif
+            let client = try await HerdrClient.connectDemo(scene: scene)
             self.client = client
             coreName = "Demo"
             coreVersion = await client.hello?.version

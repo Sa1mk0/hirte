@@ -112,8 +112,7 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         didSet { pinch?.isEnabled = pinchEnabled }
     }
     /// Watching: the terminal's size is another viewer's. It's fitted to the view as a whole
-    /// (larger or smaller than our font) and outlined, or the screen would seem to end where
-    /// the output does.
+    /// (larger or smaller than our font).
     var watching = false {
         didSet { if watching != oldValue { setNeedsDisplay() } }
     }
@@ -355,15 +354,6 @@ final class TerminalCanvasView: UIView, UIKeyInput {
         }
         if let cursor = screen.cursor, cursor.y < screen.lines.count {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
-        }
-        if watching {
-            let cells = CGRect(
-                x: g.origin.x, y: g.origin.y,
-                width: CGFloat(screen.cols) * g.cellWidth, height: CGFloat(screen.lines.count) * g.cellHeight)
-            UIColor(screen.foreground).withAlphaComponent(0.3).setStroke()
-            let outline = UIBezierPath(roundedRect: cells.insetBy(dx: -3, dy: -3), cornerRadius: 4)
-            outline.lineWidth = 1
-            outline.stroke()
         }
         if let thumb = scrollbarThumb(screen.scrollbar) {
             UIColor(screen.foreground).withAlphaComponent(0.45).setFill()

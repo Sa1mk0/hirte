@@ -8,6 +8,7 @@ struct TerminalScreenView: View {
     @Binding var expanded: Bool
     @State private var model: TerminalScreenModel
     @State private var showingInfo = false
+    @State private var showingFollowSettings = false
     @AppStorage(TerminalFont.sizeKey) private var fontSize = TerminalFont.defaultSize
     @AppStorage(TerminalFont.storageKey) private var fontFamily = TerminalFont.jetBrainsMono
     /// Open terminals watching (observe) instead of taking them over; remembered.
@@ -67,34 +68,35 @@ struct TerminalScreenView: View {
         }
         // Its task, as in the lists, else its name: on a phone the list isn't there to tell.
         .navigationTitle(terminal?.headline(inSpace: true) ?? address)
-        // Watching, the size being watched instead (the screen shows it as an outline).
+        // Watching, the size being watched instead.
         .navigationSubtitle(model.watching && terminal != nil
-            ? "Watching · \(terminal!.cols)×\(terminal!.rows)" : terminal.flatMap(spaceName) ?? "")
+            ? "Watching · \(terminal!.cols)×\(terminal!.rows)" : terminal.map(contextLine) ?? "")
         .navigationBarTitleDisplayMode(.inline)
         // The title bar sits on the terminal's background: match its brightness, not the app's.
         .toolbarColorScheme(theme.dark ? .dark : .light, for: .navigationBar)
         .onChange(of: theme, initial: true) { _, theme in model.theme = theme }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
-                if model.phase == .live {
-                    // Watching is remembered for the next terminal; typing ends it only here.
-                    Button(model.watching ? "Take Over" : "Watch Only",
-                           systemImage: model.watching ? "eye.fill" : "eye")
-                    {
-                        watchByDefault = !model.watching
-                        model.setWatching(!model.watching)
+                if model.phase == .live { watchButton }
+                if sizeClass == .compact {
+                    // A phone's bar keeps room for the title: the rest is one tap further.
+                    Menu("More", systemImage: "ellipsis") {
+                        if model.phase == .live { keyboardButton }
+                        Section("Lock Screen") {
+                            LiveActivityFollowActions(session: session, terminal: terminal,
+                                                      showingSettings: $showingFollowSettings)
+                        }
+                        infoButton
                     }
-                    Button(model.wantsKeyboard ? "Hide Keyboard" : "Show Keyboard",
-                           systemImage: model.wantsKeyboard ? "keyboard.chevron.compact.down" : "keyboard")
-                    {
-                        model.wantsKeyboard.toggle()
-                    }
+                } else {
+                    if model.phase == .live { keyboardButton }
+                    followMenu(terminal)
+                    // Hiding and showing the lists is the split view's own sidebar button.
+                    infoButton
                 }
-                LiveActivityFollowMenu(session: session, terminal: terminal)
-                // Hiding and showing the lists is the split view's own sidebar button.
-                Button("Info", systemImage: "info.circle") { showingInfo = true }
             }
         }
+        .liveActivityFollowPresentation(showingSettings: $showingFollowSettings)
         .sheet(isPresented: $showingInfo) {
             NavigationStack {
                 TerminalDetailView(session: session, address: address)
@@ -132,6 +134,42 @@ struct TerminalScreenView: View {
         }
     }
 
+    /// Watching is remembered for the next terminal; typing ends it only here.
+    private var watchButton: some View {
+        Button(model.watching ? "Take Over" : "Watch Only",
+               systemImage: model.watching ? "eye.fill" : "eye")
+        {
+            watchByDefault = !model.watching
+            model.setWatching(!model.watching)
+        }
+    }
+
+    private var keyboardButton: some View {
+        Button(model.wantsKeyboard ? "Hide Keyboard" : "Show Keyboard",
+               systemImage: model.wantsKeyboard ? "keyboard.chevron.compact.down" : "keyboard")
+        {
+            model.wantsKeyboard.toggle()
+        }
+    }
+
+    private func followMenu(_ terminal: Terminal?) -> some View {
+        LiveActivityFollowMenu(session: session, terminal: terminal, showingSettings: $showingFollowSettings)
+    }
+
+    private var infoButton: some View {
+        Button("Info", systemImage: "info.circle") { showingInfo = true }
+    }
+
+    /// Where it works and whose account, as its row says it: what it's about while you answer it.
+    private func contextLine(_ terminal: Terminal) -> String {
+        let context = TerminalContext(terminal: terminal)
+        var parts: [String] = []
+        for case let part? in [spaceName(terminal), context.branch, context.account] where !parts.contains(part) {
+            parts.append(part)
+        }
+        return parts.joined(separator: " · ")
+    }
+
     /// The space (or machine) the terminal belongs to, as the list shows it.
     private func spaceName(_ terminal: Terminal) -> String? {
         TerminalGrouping.bySpace(session.terminals, layout: session.layout)
@@ -149,7 +187,7 @@ struct TerminalScreenView: View {
                 ProgressView("Attaching…").padding(.top, 40).tint(foreground).foregroundStyle(foreground)
             }
         case .live:
-            // Watching needs no banner: the subtitle says so, and an outline shows the size.
+            // Watching needs no banner: the subtitle says so, with the size.
             if model.sizeOwnedElsewhere && !model.watching {
                 Banner(text: "Another viewer sets the size. Tap the screen and type to take over.",
                        systemImage: "rectangle.on.rectangle", dark: theme.dark)
@@ -197,7 +235,7 @@ private struct NeedsYouBar: View {
             Label {
                 Text(status?.title ?? "Waiting for you").lineLimit(2)
             } icon: {
-                Image(systemName: "hand.raised.fill").foregroundStyle(Color.needsYou)
+                Image(systemName: "hand.raised.fill").foregroundStyle(Color.needsYouMark)
             }
             .font(.callout.weight(.semibold))
             HStack(spacing: 8) {

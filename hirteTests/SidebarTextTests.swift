@@ -23,7 +23,7 @@ struct SidebarTextTests {
         ])
         #expect(agent.headline(inSpace: true) == "Add dark mode")
         #expect(agent.detail(inSpace: true, sharedFolder: "/home/me/projects/site")
-            == "agent\(separator)feature/dark")
+            == "feature/dark\(separator)agent")
     }
 
     @Test func aFolderIsOnlyRepeatedWhereItDiffersFromTheHeader() throws {
