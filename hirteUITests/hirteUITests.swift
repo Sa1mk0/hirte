@@ -223,6 +223,7 @@ final class DemoTourTests: XCTestCase {
         open(app, "t5")
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        sleep(1)
         shot(app, "adaptive-portrait")
 
         screen.tap()
@@ -239,6 +240,7 @@ final class DemoTourTests: XCTestCase {
         let windowSize = app.windows.firstMatch.frame.size
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        sleep(1)
         // A floating iPad window may keep its size when the device rotates.
         if app.windows.firstMatch.frame.size != windowSize {
             XCTAssertNotEqual(screen.frame.size, portraitSize, "the terminal follows the available area")
@@ -247,6 +249,7 @@ final class DemoTourTests: XCTestCase {
         if UIDevice.current.userInterfaceIdiom == .pad {
             XCUIDevice.shared.orientation = .portraitUpsideDown
             XCTAssertTrue(screen.waitForExistence(timeout: 5))
+            sleep(1)
             shot(app, "adaptive-upside-down")
         }
     }
