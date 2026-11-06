@@ -4,7 +4,7 @@
 
 <p align="center">
   Your terminals and coding agents, in your pocket.<br>
-  An iPhone client for <a href="https://github.com/herdrdev/herdr">herdr</a>, made for the iPhone Duo.
+  An iPhone and iPad client for <a href="https://github.com/herdrdev/herdr">herdr</a>, made for the iPhone Duo.
 </p>
 
 <p align="center">
@@ -30,7 +30,8 @@ to jump in when they are.
 - **Themes**: separate light and dark terminal themes, and a choice of fonts
 
 Unfolded on the iPhone Duo, the terminal list and a terminal sit side by side. It works on every
-iPhone with iOS 27.1 or later.
+iPhone with iOS 27.1 or later and iPad with iPadOS 27.1 or later. On iPad, the layout adapts to
+resizable windows.
 
 <p align="center">
   <picture>

@@ -48,7 +48,7 @@ final class DemoTourTests: XCTestCase {
         app.typeText("git status\n")
         sleep(1)
         shot(app, "4-shell")
-        app.buttons["Hide Keyboard"].tap()
+        app.buttons["Hide keyboard"].firstMatch.tap()
         back(app)
 
         open(app, "t2")
@@ -106,7 +106,7 @@ final class DemoTourTests: XCTestCase {
         }
         app.typeText("\n")
         pause(1.5)
-        app.buttons["Hide Keyboard"].tap()
+        app.buttons["Hide keyboard"].firstMatch.tap()
         pause(0.5)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         screen.pinch(withScale: 2.2, velocity: 1.5)
@@ -159,7 +159,7 @@ final class DemoTourTests: XCTestCase {
         pause(0.5)
         app.typeText("\n")
         pause(2)
-        app.buttons["Hide Keyboard"].tap()
+        app.buttons["Hide keyboard"].firstMatch.tap()
         pause(0.5)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         screen.pinch(withScale: 2.2, velocity: 1.5)
@@ -209,6 +209,46 @@ final class DemoTourTests: XCTestCase {
     private func mark(_ folder: String, _ name: String) {
         let now = String(Date().timeIntervalSince1970)
         try? now.write(to: URL(fileURLWithPath: folder).appendingPathComponent(name), atomically: true, encoding: .utf8)
+    }
+
+    /// The same terminal stays usable as its available area and keyboard change.
+    @MainActor
+    func testAdaptiveTerminalLayout() throws {
+        XCUIDevice.shared.orientation = .portrait
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments += ["-hirte.demo", "YES", "-appearance", "system", "-terminal.watch", "NO"]
+        app.launch()
+        XCTAssertTrue(blockedRow(app).waitForExistence(timeout: 10))
+        open(app, "t5")
+        let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        shot(app, "adaptive-portrait")
+
+        screen.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        let hint = app.buttons["Continue"]
+        if hint.waitForExistence(timeout: 2) { hint.tap() }
+        app.typeText("echo adaptive-window\n")
+        shot(app, "adaptive-keyboard")
+        // The accessory stays visible when the navigation toolbar moves into its overflow menu.
+        app.buttons["Hide keyboard"].firstMatch.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+
+        let portraitSize = screen.frame.size
+        let windowSize = app.windows.firstMatch.frame.size
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        // A floating iPad window may keep its size when the device rotates.
+        if app.windows.firstMatch.frame.size != windowSize {
+            XCTAssertNotEqual(screen.frame.size, portraitSize, "the terminal follows the available area")
+        }
+        shot(app, "adaptive-landscape")
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCUIDevice.shared.orientation = .portraitUpsideDown
+            XCTAssertTrue(screen.waitForExistence(timeout: 5))
+            shot(app, "adaptive-upside-down")
+        }
     }
 
     /// Pinch to zoom: the font changes once per gesture and the screen comes back crisp.
