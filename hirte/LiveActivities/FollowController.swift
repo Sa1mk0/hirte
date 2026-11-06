@@ -30,6 +30,8 @@ final class FollowController {
 
     private let defaults: UserDefaults
     private let driver: any LiveActivityDriver
+    private let beginBackgroundTask: (@escaping @MainActor () -> Void) -> UIBackgroundTaskIdentifier
+    private let endBackgroundTask: (UIBackgroundTaskIdentifier) -> Void
     private weak var source: HostSession?
     private var completed: FollowTask?
     private var completedPhase: AgentActivityAttributes.ContentState.Phase?
@@ -40,9 +42,19 @@ final class FollowController {
     private var observedTurn: UInt64?
     private var needsReconciliation = false
 
-    init(defaults: UserDefaults = .standard, driver: (any LiveActivityDriver)? = nil) {
+    init(
+        defaults: UserDefaults = .standard, driver: (any LiveActivityDriver)? = nil,
+        beginBackgroundTask: @escaping (@escaping @MainActor () -> Void) -> UIBackgroundTaskIdentifier = {
+            UIApplication.shared.beginBackgroundTask(withName: "Mark activity last known", expirationHandler: $0)
+        },
+        endBackgroundTask: @escaping (UIBackgroundTaskIdentifier) -> Void = {
+            UIApplication.shared.endBackgroundTask($0)
+        }
+    ) {
         self.defaults = defaults
         self.driver = driver ?? ActivityKitDriver()
+        self.beginBackgroundTask = beginBackgroundTask
+        self.endBackgroundTask = endBackgroundTask
         enabled = defaults.bool(forKey: Self.enabledKey)
         showTitle = defaults.bool(forKey: Self.titleKey)
     }
@@ -216,15 +228,22 @@ final class FollowController {
     }
 
     private func markLastKnown() {
-        guard var state = lastState, let id = selection?.followID else { return }
+        guard var state = lastState, !state.isLastKnown, let id = selection?.followID else { return }
         state.isLastKnown = true
         needsReconciliation = true
         lastState = state
         // Keep a little time for ActivityKit to accept the final snapshot before iOS suspends us.
-        let background = UIApplication.shared.beginBackgroundTask(withName: "Mark activity last known")
+        var background = UIBackgroundTaskIdentifier.invalid
+        let endBackground = {
+            guard background != .invalid else { return }
+            let task = background
+            background = .invalid
+            self.endBackgroundTask(task)
+        }
+        background = beginBackgroundTask(endBackground)
         enqueue {
+            defer { endBackground() }
             if self.selection?.followID == id { await self.driver.update(state) }
-            if background != .invalid { UIApplication.shared.endBackgroundTask(background) }
         }
     }
 

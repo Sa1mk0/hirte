@@ -3,6 +3,7 @@ import Foundation
 @testable import HerdrKit
 import SwiftUI
 import Testing
+import UIKit
 @testable import hirte
 
 @MainActor
@@ -148,6 +149,9 @@ private final class RecordingActivityDriver: LiveActivityDriver {
     var starts = 0
     var maximumConcurrent = 0
     var removeCalls = 0
+    var updates = 0
+    var holdUpdates = false
+    var pendingUpdate: CheckedContinuation<Void, Never>?
     var dismissed: (@MainActor () -> Void)?
 
     func start(id: UUID, state: AgentActivityAttributes.ContentState) throws {
@@ -157,7 +161,11 @@ private final class RecordingActivityDriver: LiveActivityDriver {
         self.state = state
         starts += 1
     }
-    func update(_ state: AgentActivityAttributes.ContentState) async { self.state = state }
+    func update(_ state: AgentActivityAttributes.ContentState) async {
+        self.state = state
+        updates += 1
+        if holdUpdates { await withCheckedContinuation { pendingUpdate = $0 } }
+    }
     func end(_ state: AgentActivityAttributes.ContentState?, seconds: TimeInterval) async {
         currentID = nil
         self.state = state
@@ -173,6 +181,97 @@ private final class RecordingActivityDriver: LiveActivityDriver {
 
 @MainActor
 struct FollowControllerTests {
+    @Test func lastKnownHandoffDeduplicatesAndEndsItsOwnBackgroundTask() async throws {
+        let suite = "LiveActivityTests.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let driver = RecordingActivityDriver()
+        var expirations: [@MainActor () -> Void] = []
+        var ended: [UIBackgroundTaskIdentifier] = []
+        let controller = FollowController(
+            defaults: defaults, driver: driver,
+            beginBackgroundTask: { expiration in
+                expirations.append(expiration)
+                return UIBackgroundTaskIdentifier(rawValue: expirations.count)
+            },
+            endBackgroundTask: { ended.append($0) })
+        let session = HostSession(host: .makeDemo())
+        session.start(keys: KeyLibrary())
+        defer { session.stop() }
+        for _ in 0..<200 {
+            if session.state == .connected { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let terminal = try #require(session.terminals.first(where: FollowTask.canFollow))
+        let window = UUID()
+        controller.enabled = true
+        controller.window(window, phase: .active)
+        controller.start(session: session, terminal: terminal)
+        await controller.waitForUpdates()
+
+        // Expire while the final snapshot is still queued behind an earlier platform update.
+        driver.holdUpdates = true
+        controller.received(session)
+        for _ in 0..<200 {
+            if driver.pendingUpdate != nil { break }
+            await Task.yield()
+        }
+        let previousUpdate = try #require(driver.pendingUpdate)
+        driver.pendingUpdate = nil
+        controller.window(window, phase: .inactive)
+        controller.window(window, phase: .background)
+        controller.disconnected(session)
+        #expect(expirations.count == 1)
+        #expect(ended.isEmpty)
+        let firstExpiration = try #require(expirations.first)
+        firstExpiration()
+        firstExpiration()
+        #expect(ended.map(\.rawValue) == [1])
+        driver.holdUpdates = false
+        previousUpdate.resume()
+        await controller.waitForUpdates()
+        #expect(driver.updates == 2)
+        #expect(driver.state?.isLastKnown == true)
+        #expect(ended.map(\.rawValue) == [1])
+        controller.disconnected(session)
+        controller.removeWindow(window)
+        await controller.waitForUpdates()
+        #expect(expirations.count == 1) // Still stale after the first handoff completed.
+
+        // A resumed live snapshot permits a new handoff; an old expiry cannot end its task.
+        controller.window(window, phase: .active)
+        controller.received(session)
+        await controller.waitForUpdates()
+        driver.holdUpdates = true
+        controller.window(window, phase: .inactive)
+        for _ in 0..<200 {
+            if driver.pendingUpdate != nil { break }
+            await Task.yield()
+        }
+        let finalUpdate = try #require(driver.pendingUpdate)
+        driver.pendingUpdate = nil
+        #expect(expirations.count == 2)
+        firstExpiration()
+        #expect(ended.map(\.rawValue) == [1])
+        expirations[1]()
+        #expect(ended.map(\.rawValue) == [1, 2])
+        driver.holdUpdates = false
+        finalUpdate.resume()
+        await controller.waitForUpdates()
+        #expect(ended.map(\.rawValue) == [1, 2])
+
+        // Normal completion also relinquishes the task, even if expiry arrives afterwards.
+        controller.window(window, phase: .active)
+        controller.received(session)
+        await controller.waitForUpdates()
+        controller.window(window, phase: .background)
+        await controller.waitForUpdates()
+        #expect(expirations.count == 3)
+        #expect(ended.map(\.rawValue) == [1, 2, 3])
+        expirations[2]()
+        #expect(ended.map(\.rawValue) == [1, 2, 3])
+    }
+
     @Test func lifecycleReplacementPrivacyAndDismissal() async throws {
         let suite = "LiveActivityTests.\(UUID())"
         let defaults = try #require(UserDefaults(suiteName: suite))

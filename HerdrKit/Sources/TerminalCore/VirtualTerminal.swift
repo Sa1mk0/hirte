@@ -429,6 +429,7 @@ public final class VirtualTerminal {
     /// otherwise through our own scrollback.
     public func wheel(lines: Int, column: Int, row: Int) -> WheelResult {
         guard lines != 0 else { return .send(Data()) }
+        endRenderHold()
         if isMouseTracking {
             prepareMouse()
             ghostty_mouse_event_set_action(mouseEvent, GHOSTTY_MOUSE_ACTION_PRESS)

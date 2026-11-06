@@ -184,6 +184,23 @@ final class TerminalRenderingTests: XCTestCase {
         XCTAssertNil(vt.renderHoldRemaining)
     }
 
+    func testWheelReleasesHoldWithoutWaitingForRemoteOutput() throws {
+        for mode in ["\u{1B}[?1000h\u{1B}[?1006h", "\u{1B}[?1049h"] {
+            let vt = try VirtualTerminal(cols: 20, rows: 5)
+            vt.write(Data((mode + "before").utf8))
+            _ = vt.frame()
+            vt.write(Data("\r\u{1B}[?2026hafter".utf8))
+            XCTAssertNotNil(vt.renderHoldRemaining)
+            XCTAssertTrue(vt.frame().lines[0].map(\.text).joined().hasPrefix("before"))
+            guard case .send(let data) = vt.wheel(lines: -1, column: 1, row: 1) else {
+                return XCTFail("Mouse and alternate-screen wheel input goes to the program")
+            }
+            XCTAssertFalse(data.isEmpty)
+            XCTAssertNil(vt.renderHoldRemaining)
+            XCTAssertTrue(vt.frame().lines[0].map(\.text).joined().hasPrefix("after"))
+        }
+    }
+
     func testInteractionReleasesSynchronizedOutput() throws {
         let vt = try fixture()
         vt.write(Data("\u{1B}[?2026h".utf8))

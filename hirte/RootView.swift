@@ -68,6 +68,10 @@ struct RootView: View {
             selectedHost.wrappedValue = host.id
             sessions.session(for: host).start(keys: keys)
         }
+        .onChange(of: selectedHost.wrappedValue) {
+            // Reset before a connected follow route selects the new host's terminal.
+            selectedTerminal = nil
+        }
         .onChange(of: pendingSessionConnected) { openFollowRoute() }
         .task(id: pendingFollowRoute?.followID) {
             guard pendingFollowRoute != nil else { return }
@@ -81,9 +85,6 @@ struct RootView: View {
             if UserDefaults.standard.bool(forKey: "hirte.demo") { storedHost = hosts.addDemo().id.uuidString }
         }
         #endif
-        .onChange(of: selectedHost.wrappedValue) {
-            selectedTerminal = nil
-        }
         .onChange(of: hosts.hosts) { _, current in
             follow.hostsChanged(Set(current.map(\.id)))
             // Edited or deleted machines get a fresh session.

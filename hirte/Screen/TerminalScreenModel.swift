@@ -295,6 +295,7 @@ final class TerminalScreenModel {
             renderNow()
         case .send(let data):
             send(data)
+            renderNow()
         }
     }
 
