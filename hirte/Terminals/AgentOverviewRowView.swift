@@ -37,7 +37,7 @@ struct AgentOverviewRowView: View {
                 if !contextLine.isEmpty { factLine(contextLine) }
                 if !identityLine.isEmpty { factLine(identityLine) }
                 if let directory {
-                    Text(directory).sidebarDetail().lineLimit(1).truncationMode(.middle)
+                    Text(directory).sidebarDetail().lineLimit(large ? nil : 1).truncationMode(.middle)
                 }
                 if let reason {
                     Text("Family: \(AgentOverview.title(reason)) — \((familyState ?? AgentOverviewState(terminal: reason)).title)")

@@ -26,6 +26,8 @@ extension Color {
             ? UIColor(red: 0xe9 / 255, green: 0xa2 / 255, blue: 0x6b / 255, alpha: 1)
             : UIColor(red: 0xa8 / 255, green: 0x54 / 255, blue: 0x00 / 255, alpha: 1)
     })
+    /// Behind the sidebar next to the detail column: app chrome, whatever the terminal's theme.
+    static let sidebarBackground = Color(uiColor: .secondarySystemBackground)
     /// The fill of a selected sidebar row. Rows set their text colors below themselves, so that
     /// the system's white labels for a selected row don't have to work on every fill.
     static let sidebarSelection = Color(uiColor: UIColor { traits in

@@ -26,6 +26,8 @@ struct TerminalListView: View {
     @AppStorage("terminals.collapsed") private var collapsed = ""
     @AppStorage(AgentOverviewPreferences.storageKey) private var overviewStored = ""
     @State private var showingAgentSettings = false
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     private var overview: AgentOverviewPreferences { .init(rawValue: overviewStored) }
 
@@ -311,19 +313,20 @@ struct TerminalListView: View {
                 }
         }
             .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
             Picker("View", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .padding(.horizontal, 16)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                // Under the views' switch, a level below it. Not in the list, whose updates can
-                // swallow a tap on an open menu, and not in the toolbar, where it would overflow.
-                if mode == .agents { overviewMenu.padding(.horizontal, 16) }
+            // Under the views' switch, a level below it, and not in the toolbar, where it would
+            // overflow. However far it wraps, the strip covers the rows scrolling under it.
+            if mode == .agents {
+                overviewMenu.padding(.bottom, typeSize.isAccessibilitySize ? 8 : 0)
             }
-            .background(.bar)
+            }
+            .padding(.horizontal, 16)
+            .background(sizeClass == .compact ? Color(uiColor: .systemGroupedBackground) : Color.sidebarBackground)
         }
     }
 
@@ -679,37 +682,40 @@ struct SpaceHeader: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            if case .machine = section.kind {
-                Image(systemName: "server.rack")
-                    .foregroundStyle(Color.rowSecondary)
-                    .accessibilityLabel("Machine")
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(section.title).sidebarSectionTitle().lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                if typeSize.isAccessibilitySize { counts }
-                if let folder = section.workingFolder {
-                    Text(Terminal.abbreviate(folder))
-                        .sidebarDetail()
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                if case .machine = section.kind {
+                    Image(systemName: "server.rack")
+                        .foregroundStyle(Color.rowSecondary)
+                        .accessibilityLabel("Machine")
+                }
+                Text(section.title).sidebarSectionTitle().lineLimit(large ? nil : 1)
+                Spacer(minLength: 4)
+                if !large { counts }
+                if let addTerminal {
+                    Button(action: addTerminal) {
+                        Image(systemName: "plus")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.rowPrimary)
+                            .frame(width: SidebarMetrics.touchTarget, height: SidebarMetrics.touchTarget)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("New Terminal in \(section.title)")
                 }
             }
-            Spacer(minLength: 4)
-            if !typeSize.isAccessibilitySize { counts }
-            if let addTerminal {
-                Button(action: addTerminal) {
-                    Image(systemName: "plus")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.rowPrimary)
-                        .frame(width: SidebarMetrics.touchTarget, height: SidebarMetrics.touchTarget)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("New Terminal in \(section.title)")
+            if large { counts }
+            // Its own line, for the whole width: the name's line has the plus's touch target.
+            if let folder = section.workingFolder {
+                Text(Terminal.abbreviate(folder))
+                    .sidebarDetail()
+                    .lineLimit(large ? nil : 1)
+                    .truncationMode(.middle)
             }
         }
     }
+
+    private var large: Bool { typeSize.isAccessibilitySize }
 }
 
 extension Terminal {

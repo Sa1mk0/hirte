@@ -43,6 +43,9 @@ struct RootView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView(sessions: sessions, selectedHost: selectedHost, selectedTerminal: $selectedTerminal)
+                // The detail column runs under the sidebar: its default material would take on the
+                // colors of what's selected.
+                .containerBackground(Color.sidebarBackground, for: .navigation)
         } detail: {
             if let host = hosts.hosts.first(where: { $0.id == selectedHost.wrappedValue }),
                let address = selectedTerminal {

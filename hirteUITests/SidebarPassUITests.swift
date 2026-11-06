@@ -139,6 +139,7 @@ final class SidebarPassUITests: XCTestCase {
         app = launch(textSize: "UICTContentSizeCategoryAccessibilityXL")
         let besideTerminal = app.buttons["Hide Sidebar"].waitForExistence(timeout: 5)
         shot("sidebar-many-large-top-\(appearance)")
+        let strip = app.buttons["agent-overview-menu"]
         let children = app.buttons["children-t1"]
         reveal(children, in: app)
         XCTAssertTrue(children.exists)
@@ -158,17 +159,35 @@ final class SidebarPassUITests: XCTestCase {
         XCTAssertTrue(identity.isHittable, "provider and account stay on a child")
         XCTAssertLessThanOrEqual(identity.frame.maxY, window.maxY, "the whole line is in the window")
         shot("sidebar-many-large-child-\(appearance)")
+        // Rows are scrolled under the wrapped strip now: nothing of them shows through its lower edge.
+        let edge = stripEdgeColors(below: strip.frame)
+        XCTAssertEqual(edge.count, 1, "the strip's background is opaque: \(edge)")
         if besideTerminal {
             identity.tap()
             shot("sidebar-many-large-child-selected-\(appearance)")
         }
         app.buttons["Terminals"].tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "t1").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["~/projects/website"].exists, "a space's folder is whole, wrapped if need be")
         shot("sidebar-terminals-large-\(appearance)")
         app.terminate()
 
         app = launch()
         resetRows(app)
+    }
+
+    /// The colors along a line just below the strip's control, inside its background.
+    private func stripEdgeColors(below frame: CGRect) -> Set<[UInt8]> {
+        let image = XCUIScreen.main.screenshot().image
+        guard let cgImage = image.cgImage, let data = cgImage.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else { return [] }
+        let y = Int((frame.maxY + 4) * image.scale)
+        var colors: Set<[UInt8]> = []
+        for x in stride(from: Int(frame.minX * image.scale), to: Int(frame.maxX * image.scale), by: 4) {
+            let offset = y * cgImage.bytesPerRow + x * cgImage.bitsPerPixel / 8
+            colors.insert([bytes[offset], bytes[offset + 1], bytes[offset + 2]])
+        }
+        return colors
     }
 
     /// Picks an agent view from the menu and waits until the list shows it.
