@@ -42,7 +42,7 @@ App tests: `xcodebuild … -only-testing:hirteTests test` (unit) or `-only-testi
   `just archive true` raises it; commit that.
 - **Generated files**: `hirte/Licenses/licenses.json` (`just licenses`, after changing Swift packages,
   bundled fonts or the Ghostty pin; it fails if a package has no license entry),
-  `hirte/Settings/themes.json` (`just themes`), the app icons (`just icon` from `assets/logo.svg`).
+  `hirte/Settings/themes.json` (`just themes`), the app icons (`just icon` from the `assets/logo*.svg` material variants and flat Debug mark).
 - **Bundled fonts** live in `hirte/Fonts` and are registered at runtime (`Fonts.mono`); each needs a
   license entry.
 - **Sidebar rows** of both views share `SidebarRow` and the roles in `Terminals/SidebarStyle.swift`
