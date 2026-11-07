@@ -148,25 +148,35 @@ ghostty:
     cp -R .build/ghostty-vt/lib/ghostty-vt.xcframework HerdrKit/Frameworks/
     echo "HerdrKit/Frameworks/ghostty-vt.xcframework is ready"
 
-# Render the app icons (light, dark, tinted) from assets/logo.svg
+# Render the Preview app icons from the material variants and the flat Debug mark.
 icon:
     #!/usr/bin/env bash
     set -euo pipefail
     out=hirte/Assets.xcassets/AppIcon.appiconset
-    render() { sed -e "s/#d9dad8/$2/g" -e "s/#303438/$3/g" assets/logo.svg | rsvg-convert -w 1024 -h 1024 -b "$2" -o "$out/$1"; }
-    render icon-light.png '#d9dad8' '#303438'
-    render icon-dark.png '#1f2124' '#d9dad8'
-    render icon-tinted.png '#000000' '#ffffff'
-    # Debug builds ("Hirte Dev"): the same mark in amber, so the two apps are easy to tell apart.
+    render() { rsvg-convert -w 1024 -h 1024 "$1" -o "$out/$2"; }
+    render assets/logo.svg icon-light.png
+    render assets/logo-dark.svg icon-dark.png
+    render assets/logo-tinted.svg icon-tinted.png
+    # Debug keeps an amber tile so it remains distinct from the TestFlight app.
     out=hirte/Assets.xcassets/AppIcon-Dev.appiconset
     mkdir -p "$out"
     cp hirte/Assets.xcassets/AppIcon.appiconset/Contents.json "$out/"
-    render icon-light.png '#f2b33d' '#303438'
-    render icon-dark.png '#1f2124' '#f2b33d'
-    render icon-tinted.png '#000000' '#ffffff'
-    # The App Store rejects icons with an alpha channel.
-    for f in hirte/Assets.xcassets/AppIcon*.appiconset/icon-*.png; do sips -s format png -s hasAlpha no "$f" >/dev/null 2>&1 || true; done
-    echo "icons written to hirte/Assets.xcassets/AppIcon.appiconset and AppIcon-Dev.appiconset"
+    render_debug() { sed -e "s/#d9dad8/$2/g" -e "s/#303438/$3/g" assets/logo-mark.svg | rsvg-convert -w 1024 -h 1024 -b "$2" -o "$out/$1"; }
+    render_debug icon-light.png '#f2b33d' '#303438'
+    render_debug icon-dark.png '#1f2124' '#f2b33d'
+    render_debug icon-tinted.png '#000000' '#ffffff'
+    # Verify actual RGB output; sips cannot remove an alpha channel with hasAlpha.
+    python3 - <<'PYTHON'
+    from pathlib import Path
+    import struct
+    icons = list(Path('hirte/Assets.xcassets').glob('AppIcon*.appiconset/icon-*.png'))
+    assert len(icons) == 6, 'Expected three appearances in each icon set'
+    for icon in icons:
+        raw = icon.read_bytes()
+        width, height = struct.unpack('>II', raw[16:24])
+        assert (width, height, raw[25]) == (1024, 1024, 2), f'{icon}: expected 1024x1024 RGB without alpha'
+    print('Verified six 1024x1024 RGB app icons without alpha')
+    PYTHON
 
 # Run the HerdrKit package tests on this Mac (includes a live test against local herdr-core)
 test:
