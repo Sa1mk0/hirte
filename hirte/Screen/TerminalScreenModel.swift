@@ -31,6 +31,10 @@ final class TerminalScreenModel {
     private var attached: AttachedTerminal?
     private var pump: Task<Void, Never>?
     @ObservationIgnored private var displayLink: CADisplayLink?
+    @ObservationIgnored private var interactionRender: Task<Void, Never>?
+    #if DEBUG
+    @ObservationIgnored private(set) var renderedFrames = 0
+    #endif
     @ObservationIgnored private var holdTimeout: Task<Void, Never>?
     /// What this view would like (fits its bounds); sent whenever we act.
     private var preferredSize: (cols: Int, rows: Int)?
@@ -64,6 +68,24 @@ final class TerminalScreenModel {
         frame = Self.blank(theme)
     }
 
+    #if DEBUG
+    /// In-memory terminal for deterministic input/render tests; never opens a host connection.
+    convenience init(theme: TerminalTheme, terminal: VirtualTerminal) {
+        self.init(theme: theme)
+        vt = terminal
+        frame = terminal.frame()
+        phase = .live
+    }
+
+    var queuedInputForTesting: [Data] { pendingInput }
+
+    /// Matches the output pump's write/schedule sequence, without SSH or live host data.
+    func receiveOutputForTesting(_ data: Data) {
+        vt?.write(data)
+        scheduleRender()
+    }
+    #endif
+
     /// No content yet, in the theme's colors (not the dark default, which flashed in light mode).
     private static func blank(_ theme: TerminalTheme) -> ScreenFrame {
         var frame = ScreenFrame.empty
@@ -91,6 +113,8 @@ final class TerminalScreenModel {
     func stop() {
         displayLink?.invalidate()
         displayLink = nil
+        interactionRender?.cancel()
+        interactionRender = nil
         holdTimeout?.cancel()
         holdTimeout = nil
         pump?.cancel()
@@ -287,15 +311,17 @@ final class TerminalScreenModel {
             guard !vt.isAlternateScreen else { return }
             vt.scroll(by: lines)
             scrolledBack = true
-            return renderNow()
+            return scheduleInteractionRender()
         }
         switch vt.wheel(lines: lines, column: column, row: row) {
         case .scrolledLocally:
             scrolledBack = true
-            renderNow()
+            scheduleInteractionRender()
         case .send(let data):
             send(data)
-            renderNow()
+            // Wheel input is sent immediately and in the existing byte order. Only the
+            // snapshot is coalesced, together with any output arriving before this turn ends.
+            scheduleInteractionRender()
         }
     }
 
@@ -327,9 +353,20 @@ final class TerminalScreenModel {
 
     // MARK: Rendering
 
+    /// Coalesce a burst of gestures on the main actor, then publish before the next
+    /// display tick. Waiting for a display link here adds a refresh interval before
+    /// SwiftUI can invalidate the canvas; input should not pay that extra latency.
+    private func scheduleInteractionRender() {
+        guard interactionRender == nil else { return }
+        interactionRender = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            self?.renderNow()
+        }
+    }
+
     /// Coalesces bursts of output into one frame.
     private func scheduleRender() {
-        guard displayLink == nil else { return }
+        guard displayLink == nil, interactionRender == nil else { return }
         let tick = TerminalRenderTick { [weak self] in self?.renderNow() }
         let link = CADisplayLink(target: tick, selector: #selector(TerminalRenderTick.fire(_:)))
         displayLink = link
@@ -341,10 +378,15 @@ final class TerminalScreenModel {
     private func renderNow() {
         displayLink?.invalidate()
         displayLink = nil
+        interactionRender?.cancel()
+        interactionRender = nil
         holdTimeout?.cancel()
         holdTimeout = nil
         guard let vt else { return }
         frame = vt.frame()
+        #if DEBUG
+        renderedFrames += 1
+        #endif
         if let remaining = vt.renderHoldRemaining {
             holdTimeout = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(remaining)) }

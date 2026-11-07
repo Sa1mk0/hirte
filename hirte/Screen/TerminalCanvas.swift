@@ -56,6 +56,11 @@ final class TerminalCanvasView: UIView, UITextInput {
     }
     private var textRows: [TextRowKey: TextRow] = [:]
     private(set) var textRowBytes = 0
+    #if DEBUG
+    /// Lab diagnostics: CPU rasterizations, not presented frames.
+    private(set) var textRowRasterizations = 0
+    var didDrawForTesting: (() -> Void)?
+    #endif
     private var textRowUse: UInt64 = 0
     private var textRowConfiguration: TextRowConfiguration?
 
@@ -350,6 +355,9 @@ final class TerminalCanvasView: UIView, UITextInput {
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
+        #if DEBUG
+        defer { didDrawForTesting?() }
+        #endif
         UIColor(screen.background).setFill()
         context.fill(rect)
         // While pinching, the scaled snapshot shows the screen; drawing under it would show at its edges.
@@ -395,6 +403,9 @@ final class TerminalCanvasView: UIView, UITextInput {
             textRows[key] = cached
             image = cached.image
         } else {
+            #if DEBUG
+            textRowRasterizations += 1
+            #endif
             // One point of bleed retains italic edges and descenders. The bitmap is transparent
             // so a selection changing underneath it never requires shaping the text again.
             let size = CGSize(width: ceil(CGFloat(line.count) * g.cellWidth) + 2, height: g.cellHeight + 2)
@@ -409,9 +420,15 @@ final class TerminalCanvasView: UIView, UITextInput {
                 let bytes = bitmap.bytesPerRow * bitmap.height
                 // A strict budget and LRU eviction avoid NSCache's advisory limits and bulk
                 // purges, which caused measurable frame-time spikes during repeated edits.
-                let budget = 12 * 1024 * 1024
+                // A 12 MiB budget cannot hold even one 100×60 iPad viewport at @2:
+                // sequential LRU eviction then rasterizes every row on every draw. Keep
+                // enough for the largest iPad viewport plus a little scroll reuse, bounded
+                // both by bytes and row count (never by the terminal's history length).
+                let budget = 32 * 1024 * 1024
                 if bytes <= budget {
-                    while textRowBytes + bytes > budget || textRows.count >= 160 {
+                    // Comic Mono at 7 pt fits 169 rows on a full 13-inch iPad;
+                    // the row bound must fit that viewport too, not just its bitmap bytes.
+                    while textRowBytes + bytes > budget || textRows.count >= 192 {
                         guard let oldest = textRows.min(by: { $0.value.used < $1.value.used }) else { break }
                         textRowBytes -= oldest.value.bytes
                         textRows.removeValue(forKey: oldest.key)
@@ -672,17 +689,21 @@ final class TerminalCanvasView: UIView, UITextInput {
     // MARK: Gestures
 
     @objc private func tapped(_ tap: UITapGestureRecognizer) {
+        handleTap(at: tap.location(in: self))
+    }
+
+    /// Shared by touch input and focused interaction tests.
+    func handleTap(at point: CGPoint) {
         guard let model else { return }
-        let point = tap.location(in: self)
         editMenu.dismissMenu()
         switch model.tap(at: cell(at: point)) {
         case .link(let url):
             menuLink = url
             editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
-        case .unhandled:
+        case .unhandled, .handled:
+            // Mouse-reporting TUIs still need local text focus after the click. Tapping
+            // while watching deliberately takes over, just like Show Keyboard / typing.
             if !isFirstResponder { _ = becomeFirstResponder() }
-        case .handled:
-            break
         }
     }
 
