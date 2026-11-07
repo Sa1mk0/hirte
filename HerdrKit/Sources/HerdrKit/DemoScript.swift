@@ -91,6 +91,7 @@ enum DemoScript {
         {"name":"reviewer","description":"Reviews the current branch and leaves notes","command":"agent --role reviewer"},\
         {"name":"fixer","description":"Fixes failing tests","command":"agent --role fixer"}]}
         """
+    static let templateNames: Set<String> = ["reviewer", "fixer"]
 
     /// Status changes over the first minute, so the list visibly lives.
     struct Step: Sendable {

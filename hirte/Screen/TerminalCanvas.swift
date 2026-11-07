@@ -13,7 +13,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             // A new model (after a reconnect) needs the grid size to attach.
             lastGrid = nil
             setNeedsLayout()
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
     }
     var screen: ScreenFrame = .empty {
@@ -22,6 +22,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             if screen.background != oldValue.background { backgroundColor = UIColor(screen.background) }
             synchronizeScrolling()
             invalidate(from: oldValue)
+            layoutContent()
             #if DEBUG
             TerminalScrollTrace.shared?.record("canvas", offset: CGFloat(screen.scrollbar?.offset ?? 0))
             #endif
@@ -35,7 +36,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             // At once: until the new grid reaches the emulator, the old columns don't fit the
             // new font and `geometry()` would shrink it back, which looks like a jump.
             reportGridSize(force: true, immediately: true)
-            setNeedsDisplay()
+            redrawContent()
         }
     }
     var fontFamily: TerminalFont = .jetBrainsMono {
@@ -45,7 +46,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             fonts = Fonts(size: fontSize, family: fontFamily)
             scaledFonts = nil
             reportGridSize(force: true, immediately: true)
-            setNeedsDisplay()
+            redrawContent()
         }
     }
     /// Cells that fit at the current font size; reported when they change.
@@ -118,7 +119,14 @@ final class TerminalCanvasView: UIView, UITextInput {
     // UIKit owns gesture tracking and time-based deceleration. The canvas stays fixed;
     // only a viewport of cells (plus one real overscan row) is ever materialized.
     let scrollView = UIScrollView()
-    private(set) var scrollFraction: CGFloat = 0
+    /// The painted rows (see `TerminalContentView`). A fractional scroll moves `contentClip`'s
+    /// bounds, like a scroll view moves its content: no CPU repaint of unchanged rows.
+    let contentView = TerminalContentView()
+    private let contentClip = UIView()
+    private let scrollThumb = UIView()
+    private(set) var scrollFraction: CGFloat = 0 {
+        didSet { if scrollFraction != oldValue { layoutContent() } }
+    }
     private var applyingScroll = false
     // History indices can rebase while output prunes. UIKit's in-flight coordinate and
     // velocity stay untouched; this origin maps them to the current terminal history.
@@ -161,12 +169,12 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// Watching: the terminal's size is another viewer's. It's fitted to the view as a whole
     /// (larger or smaller than our font).
     var watching = false {
-        didSet { if watching != oldValue { setNeedsDisplay() } }
+        didSet { if watching != oldValue { redrawContent() } }
     }
     /// For a quick look (the list's long-press preview): the font as set, never shrunk to fit;
     /// what doesn't fit is cut off on the right and above the cursor row.
     var cropped = false {
-        didSet { if cropped != oldValue { setNeedsDisplay() } }
+        didSet { if cropped != oldValue { redrawContent() } }
     }
     /// A sideways swipe that starts in our left part, for showing or hiding the lists beside us
     /// (see `onEdgeSwipe`). Not a `UIScreenEdgePanGestureRecognizer`: with the lists showing, our
@@ -208,13 +216,22 @@ final class TerminalCanvasView: UIView, UITextInput {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true
-        // Never scale the drawn screen: when the keyboard or a fold animates our frame,
-        // Core Animation would stretch the old bitmap to the new size until the redraw
-        // lands, which looks like the font jumping. Pin it to the top-left and clip.
-        contentMode = .topLeft
-        layer.contentsGravity = .topLeft
         clipsToBounds = true
         backgroundColor = UIColor(screen.background)
+        // Never scale the drawn screen: when the keyboard or a fold animates our frame,
+        // Core Animation would stretch the old bitmap to the new size until the redraw
+        // lands, which looks like the font jumping. Pin it to the top-left.
+        contentView.canvas = self
+        contentView.isOpaque = true
+        contentView.contentMode = .topLeft
+        contentView.layer.contentsGravity = .topLeft
+        contentView.isUserInteractionEnabled = false
+        contentClip.isUserInteractionEnabled = false
+        contentClip.addSubview(contentView)
+        addSubview(contentClip)
+        scrollThumb.isUserInteractionEnabled = false
+        scrollThumb.isHidden = true
+        addSubview(scrollThumb)
         // For UI tests and VoiceOver users: the terminal as one element.
         isAccessibilityElement = true
         accessibilityLabel = "Terminal"
@@ -269,7 +286,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         cancelScrolling()
         keyboardInset = inset
         synchronizeScrolling()
-        setNeedsDisplay()
+        redrawContent()
         reportGridSize(force: false, immediately: true)
     }
 
@@ -284,8 +301,80 @@ final class TerminalCanvasView: UIView, UITextInput {
         #endif
         synchronizeScrolling()
         reportGridSize(force: false)
-        setNeedsDisplay()
+        // Repaints only when the painted area changes size (`layoutContent`), never per layout pass.
+        layoutContent()
     }
+
+    /// UIKit gives a view that draws (the content view) its screen's scale; the canvas itself
+    /// no longer draws, so its scale is the content's. Setting it (tests) sets both.
+    override var contentScaleFactor: CGFloat {
+        get { contentView.contentScaleFactor }
+        set {
+            super.contentScaleFactor = newValue
+            contentView.contentScaleFactor = newValue
+        }
+    }
+
+    private func redrawContent() {
+        layoutContent()
+        contentView.setNeedsDisplay()
+    }
+
+    /// Places the painted rows: a pure fraction moves them, it never repaints them. The rows'
+    /// window (and its real overscan row below) is clipped only while history shows one.
+    private func layoutContent() {
+        let g = geometry()
+        let window = CGRect(x: 0, y: g.origin.y, width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight)
+        let thumb = scrollbarThumb(screen.scrollbar)
+        // Keyboard notifications and SwiftUI updates can arrive inside animation blocks.
+        UIView.performWithoutAnimation {
+            if contentClip.frame != window { contentClip.frame = window }
+            let origin = CGPoint(x: 0, y: window.minY + scrollFraction)
+            if contentClip.bounds.origin != origin { contentClip.bounds.origin = origin }
+            contentClip.clipsToBounds = screen.lineBelow != nil
+            let size = CGSize(width: bounds.width, height: bounds.height + g.cellHeight)
+            if contentView.frame != CGRect(origin: .zero, size: size) {
+                contentView.frame = CGRect(origin: .zero, size: size)
+                contentView.setNeedsDisplay()
+            }
+            scrollThumb.isHidden = thumb == nil || pinchSnapshot != nil
+            if let thumb {
+                scrollThumb.frame = thumb
+                scrollThumb.layer.cornerRadius = thumb.width / 2
+                scrollThumb.backgroundColor = UIColor(screen.foreground).withAlphaComponent(0.45)
+            }
+        }
+        #if DEBUG
+        if presentedFraction != scrollFraction || presentedRow != screen.scrollbar?.offset {
+            presentedFraction = scrollFraction
+            presentedRow = screen.scrollbar?.offset
+            contentMoves += 1
+            TerminalScrollTrace.shared?.record("present", state: scrollView.isDecelerating ? 4 : 0,
+                offset: CGFloat(screen.scrollbar?.offset ?? 0) * g.cellHeight + scrollFraction, height: g.cellHeight)
+        }
+        #endif
+    }
+
+    #if DEBUG
+    private var presentedFraction: CGFloat = 0
+    private var presentedRow: Int?
+    /// Lab diagnostics: position changes of the painted rows (movement, not CPU drawing).
+    private(set) var contentMoves = 0
+    /// Lab diagnostics: CPU draws of the painted rows.
+    private(set) var contentDraws = 0
+
+    /// The CPU drawing path alone, into the current context (benchmarks, cache labs).
+    func drawForTesting(_ rect: CGRect) { drawContent(rect) }
+
+    /// What the screen shows: the composited layers, after any pending paint (all rows again
+    /// with `repaint`, e.g. to compare a cache hit with a fresh canvas).
+    func renderForTesting(in context: CGContext, repaint: Bool = true) {
+        layoutIfNeeded()
+        if repaint { contentView.setNeedsDisplay() }
+        contentView.layer.displayIfNeeded()
+        layer.render(in: context)
+    }
+    #endif
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -361,7 +450,7 @@ final class TerminalCanvasView: UIView, UITextInput {
            let row = screen.cursor?.y ?? screen.cursorRow, row >= visibleRows {
             origin.y -= CGFloat(row - visibleRows + 1) * drawFonts.cellHeight
         }
-        origin.y -= scrollFraction
+        // Rows are painted without the scroll fraction; `layoutContent` moves them by it.
         return Geometry(origin: origin, fonts: drawFonts)
     }
 
@@ -369,7 +458,7 @@ final class TerminalCanvasView: UIView, UITextInput {
     func cell(at point: CGPoint) -> (x: Int, y: Int) {
         let g = geometry()
         let x = Int((point.x - g.origin.x) / g.cellWidth)
-        let y = Int(floor((point.y - g.origin.y) / g.cellHeight))
+        let y = Int(floor((point.y + scrollFraction - g.origin.y) / g.cellHeight))
         let lastRow = screen.rows - 1 + (scrollFraction > 0 && screen.lineBelow != nil ? 1 : 0)
         return (min(max(x, 0), max(screen.cols - 1, 0)), min(max(y, 0), max(lastRow, 0)))
     }
@@ -379,37 +468,37 @@ final class TerminalCanvasView: UIView, UITextInput {
             .insetBy(dx: 0, dy: -1)
     }
 
-    /// Redraws only lines whose cells, selection or cursor changed.
+    /// Redraws only lines whose cells, selection or cursor changed (the scrollbar is a view).
     private func invalidate(from old: ScreenFrame) {
         guard old.cols == screen.cols, old.rows == screen.rows, old.lines.count == screen.lines.count,
               old.background == screen.background, old.foreground == screen.foreground
         else {
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
             return
         }
         let g = geometry()
         if old.lineBelow != screen.lineBelow || old.selectionBelow != screen.selectionBelow {
-            setNeedsDisplay(lineRect(screen.rows, g))
+            contentView.setNeedsDisplay(lineRect(screen.rows, g))
         }
         for y in screen.lines.indices
         where old.lines[y] != screen.lines[y]
             || (old.selection.indices.contains(y) ? old.selection[y] : nil)
                 != (screen.selection.indices.contains(y) ? screen.selection[y] : nil)
         {
-            setNeedsDisplay(lineRect(y, g))
-        }
-        if old.scrollbar != screen.scrollbar, scrollbarThumb(old.scrollbar) != nil || scrollbarThumb(screen.scrollbar) != nil {
-            setNeedsDisplay(CGRect(x: bounds.maxX - 12, y: 0, width: 12, height: bounds.height))
+            contentView.setNeedsDisplay(lineRect(y, g))
         }
         if old.cursor != screen.cursor {
-            if let y = old.cursor?.y { setNeedsDisplay(lineRect(y, g)) }
-            if let y = screen.cursor?.y { setNeedsDisplay(lineRect(y, g)) }
+            if let y = old.cursor?.y { contentView.setNeedsDisplay(lineRect(y, g)) }
+            if let y = screen.cursor?.y { contentView.setNeedsDisplay(lineRect(y, g)) }
         }
     }
 
-    override func draw(_ rect: CGRect) {
+    /// Paints rows in content coordinates (the canvas's, before the scroll fraction), including
+    /// the real overscan row below whenever history has one, so a fraction never needs it drawn.
+    fileprivate func drawContent(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         #if DEBUG
+        contentDraws += 1
         TerminalScrollTrace.shared?.record("draw-start", state: scrollView.isDecelerating ? 4 : 0,
             offset: CGFloat(screen.scrollbar?.offset ?? 0) * geometry().cellHeight + scrollFraction)
         defer {
@@ -426,11 +515,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         let g = geometry()
         let highlight = UIColor.tintColor.withAlphaComponent(0.4)
         context.saveGState()
-        if scrollFraction != 0 {
-            context.clip(to: CGRect(x: 0, y: g.origin.y + scrollFraction,
-                                    width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight))
-        }
-        let rowCount = screen.lines.count + (scrollFraction != 0 && screen.lineBelow != nil ? 1 : 0)
+        let rowCount = screen.lines.count + (screen.lineBelow != nil ? 1 : 0)
         for y in 0..<rowCount {
             let line = y < screen.lines.count ? screen.lines[y] : screen.lineBelow!
             let top = g.origin.y + CGFloat(y) * g.cellHeight
@@ -449,10 +534,6 @@ final class TerminalCanvasView: UIView, UITextInput {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
         }
         context.restoreGState()
-        if let thumb = scrollbarThumb(screen.scrollbar) {
-            UIColor(screen.foreground).withAlphaComponent(0.45).setFill()
-            UIBezierPath(roundedRect: thumb, cornerRadius: thumb.width / 2).fill()
-        }
     }
 
     private func drawCachedText(_ line: [ScreenCell], top: CGFloat, geometry g: Geometry) {
@@ -910,7 +991,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             snapshot.layer.position = CGPoint(x: padding, y: padding)
             insertSubview(snapshot, belowSubview: pinchLabel)
             pinchSnapshot = snapshot
-            setNeedsDisplay()
+            redrawContent()
         case .changed:
             guard pinching else { return }
             let raw = pinchStartSize * pinch.scale
@@ -953,7 +1034,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             fontSize = pinchSize
             onFontSize?(pinchSize)
         }
-        setNeedsDisplay()
+        redrawContent()
         guard let snapshot else { return }
         // Let the real screen draw underneath, then fade the snapshot away.
         UIView.animate(withDuration: 0.18, delay: 0.05, options: [.curveEaseOut]) {
@@ -1005,10 +1086,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         applyingScroll = true
         scrollView.stopScrollingAndZooming()
         applyingScroll = applying
-        if resetFraction, scrollFraction != 0 {
-            scrollFraction = 0
-            setNeedsDisplay()
-        }
+        if resetFraction { scrollFraction = 0 }
         if historyOrigin != 0 { synchronizeScrolling() }
     }
 
@@ -1104,7 +1182,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         if became {
             model?.wantsKeyboard = true
             model?.focusChanged(true)
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
         return became
     }
@@ -1114,7 +1192,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         if resigned {
             model?.wantsKeyboard = false
             model?.focusChanged(false)
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
         return resigned
     }
@@ -1494,6 +1572,16 @@ struct TerminalCanvas: UIViewRepresentable {
     }
 }
 
+/// The canvas's painted rows, in a clipping view below its scroll view. It takes no touches:
+/// the canvas and its scroll view keep every gesture and the text input.
+final class TerminalContentView: UIView {
+    fileprivate weak var canvas: TerminalCanvasView?
+
+    override func draw(_ rect: CGRect) {
+        canvas?.drawContent(rect)
+    }
+}
+
 /// A label with room around its text, for the zoom indicator.
 private final class PaddedLabel: UILabel {
     private let insets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
@@ -1560,8 +1648,8 @@ extension TerminalCanvasView: UIScrollViewDelegate {
             // Output can rebase the VT between its write and the scheduled snapshot.
             // Keep that origin shift out of UIKit's native motion, including subpixels.
             historyOrigin += CGFloat((frame.scrollbar?.offset ?? row) - row) * height
+            // Changed rows repaint through `invalidate(from:)`; a fraction alone only moves them.
             screen = frame
-            setNeedsDisplay()
         case .remote:
             let lines = row - remoteRow
             remoteRow = row

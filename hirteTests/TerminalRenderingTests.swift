@@ -42,7 +42,7 @@ final class TerminalRenderingTests: XCTestCase {
                         let frame = vt.frame()
                         let snapped = CACurrentMediaTime()
                         canvas.screen = frame
-                        canvas.draw(canvas.bounds)
+                        canvas.drawForTesting(canvas.bounds)
                         let end = CACurrentMediaTime()
                         if sample >= 30 {
                             snapshot.append((snapped - start) * 1000)
@@ -81,8 +81,8 @@ final class TerminalRenderingTests: XCTestCase {
                 canvas.screen = vt.frame()
                 let format = UIGraphicsImageRendererFormat()
                 format.scale = 3
-                let image = UIGraphicsImageRenderer(size: canvas.bounds.size, format: format).image { _ in
-                    canvas.draw(canvas.bounds)
+                let image = UIGraphicsImageRenderer(size: canvas.bounds.size, format: format).image {
+                    canvas.renderForTesting(in: $0.cgContext)
                 }
                 let attachment = XCTAttachment(image: image)
                 attachment.name = "glyphs-\(family.rawValue)-\(Int(size))"
@@ -113,7 +113,9 @@ final class TerminalRenderingTests: XCTestCase {
         format.scale = canvas.contentScaleFactor
         format.opaque = true
         format.preferredRange = .standard
-        let image = UIGraphicsImageRenderer(size: canvas.bounds.size, format: format).image { _ in canvas.draw(canvas.bounds) }
+        let image = UIGraphicsImageRenderer(size: canvas.bounds.size, format: format).image {
+            canvas.renderForTesting(in: $0.cgContext)
+        }
         return image.cgImage!.dataProvider!.data! as Data
     }
 

@@ -60,6 +60,126 @@ final class TerminalMotionTests: XCTestCase {
         }
     }
 
+    /// The painted rows move with UIKit's native offset; only a row change repaints them.
+    /// Draws and movements are counted separately, so "no draw" can't hide a frozen screen.
+    func testFractionOnlyMotionMovesPaintedRowsWithoutCPUDraws() throws {
+        let (vt, model, canvas) = try fixture()
+        defer { model.stop() }
+        let content = canvas.contentView
+        let clip = try XCTUnwrap(content.superview)
+        func displayedTop() -> CGFloat { content.convert(CGPoint.zero, to: canvas).y }
+        content.layer.displayIfNeeded()
+        XCTAssertFalse(clip.clipsToBounds, "The live screen is not clipped")
+        XCTAssertEqual(displayedTop(), 0)
+        XCTAssertTrue(canvas.hitTest(CGPoint(x: 100, y: 100), with: nil) === canvas.scrollView,
+                      "The painted rows never take touches")
+        XCTAssertFalse(content.isUserInteractionEnabled || clip.isUserInteractionEnabled)
+
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        let base = (floor(canvas.scrollView.contentOffset.y / 18) - 6) * 18
+        move(canvas, to: base + 1)
+        XCTAssertTrue(content.layer.needsDisplay(), "Entering rows repaint")
+        content.layer.displayIfNeeded()
+        let draws = canvas.contentDraws
+        let moves = canvas.contentMoves
+        XCTAssertTrue(clip.clipsToBounds)
+        XCTAssertEqual(clip.frame, CGRect(x: 0, y: 10, width: 500, height: 20 * 18),
+                       "The clip is exactly the original grid: nothing above or below it is masked")
+        for (step, fraction) in [CGFloat(1.5), 4.25, 9.5, 17.5, 3].enumerated() {
+            move(canvas, to: base + fraction)
+            XCTAssertFalse(content.layer.needsDisplay(), "A fraction alone must not repaint")
+            canvas.layoutIfNeeded()
+            content.layer.displayIfNeeded()
+            XCTAssertEqual(canvas.contentDraws, draws)
+            XCTAssertEqual(canvas.contentMoves, moves + step + 1, "Every native offset moves the rows")
+            let aligned = (fraction * 2).rounded() / 2
+            XCTAssertEqual(canvas.scrollFraction, aligned)
+            XCTAssertEqual(displayedTop(), -aligned, "Displayed geometry follows the native offset")
+            XCTAssertEqual(visibleOffset(canvas), (canvas.scrollView.contentOffset.y * 2).rounded() / 2, accuracy: 0.001)
+            XCTAssertEqual(canvas.cell(at: CGPoint(x: 20, y: 10 + 18 - aligned + 0.25)).y, 1,
+                           "Hit testing uses the same displayed geometry")
+        }
+        // Updates arriving inside an animation block (keyboard, SwiftUI) don't animate the rows.
+        UIView.animate(withDuration: 1) { self.move(canvas, to: base + 6) }
+        XCTAssertNil(clip.layer.animationKeys())
+        XCTAssertNil(content.layer.animationKeys())
+        XCTAssertEqual(displayedTop(), -6)
+        move(canvas, to: base + 18 + 2)
+        XCTAssertTrue(content.layer.needsDisplay(), "A whole row repaints the changed rows")
+
+        canvas.cancelScrolling()
+        XCTAssertEqual(canvas.scrollFraction, 0)
+        XCTAssertEqual(displayedTop(), 0, "A fraction reset moves the painted rows back")
+        canvas.layoutIfNeeded()
+        content.layer.displayIfNeeded()
+        let settled = canvas.contentDraws
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        move(canvas, to: canvas.scrollView.contentOffset.y - 18 + 7)
+        let native = canvas.scrollView.contentOffset.y
+        let remainder = ((native - floor(native / 18) * 18) * 2).rounded() / 2
+        XCTAssertGreaterThan(remainder, 0)
+        XCTAssertEqual(displayedTop(), -remainder)
+        canvas.layoutIfNeeded()
+        content.layer.displayIfNeeded()
+        XCTAssertEqual(canvas.contentDraws, settled + 1, "One repaint for the row change; layout passes add none")
+        move(canvas, to: native + 0.5)
+        canvas.layoutIfNeeded()
+        content.layer.displayIfNeeded()
+        XCTAssertEqual(canvas.contentDraws, settled + 1)
+        // A route switch (a full-screen program) cancels the gesture and drops the fraction.
+        vt.write(Data("\u{1b}[?1049h".utf8))
+        canvas.screen = vt.frame()
+        XCTAssertEqual(model.scrollRoute, .remote)
+        XCTAssertEqual(canvas.scrollFraction, 0)
+        XCTAssertEqual(displayedTop(), 0)
+        XCTAssertFalse(clip.clipsToBounds)
+        XCTAssertTrue(content.layer.needsDisplay())
+    }
+
+    /// Crossing rows repaints only invalidated lines and moves the rest. What shows after each
+    /// native step (down and back up, across several rows) equals a fresh canvas placed there.
+    func testRowCrossingPixelsMatchAFreshCanvasAtTheSameOffset() throws {
+        let (_, model, canvas) = try fixture()
+        defer { model.stop() }
+        func image(_ view: TerminalCanvasView) -> Data {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 2
+            return UIGraphicsImageRenderer(size: view.bounds.size, format: format).image {
+                view.renderForTesting(in: $0.cgContext, repaint: false)
+            }.pngData()!
+        }
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        let base = (floor(canvas.scrollView.contentOffset.y / 18) - 10) * 18
+        var crossed = 0
+        var previousRow = canvas.screen.scrollbar!.offset
+        for offset in [base + 9, base + 17.5, base + 18.5, base + 30, base + 41.5, base + 23, base + 12.5, base + 3] {
+            move(canvas, to: offset)
+            if canvas.screen.scrollbar!.offset != previousRow { crossed += 1 }
+            previousRow = canvas.screen.scrollbar!.offset
+            let (_, freshModel, fresh) = try fixture()
+            defer { freshModel.stop() }
+            fresh.scrollViewWillBeginDragging(fresh.scrollView)
+            fresh.scrollView.contentOffset.y = offset
+            XCTAssertEqual(fresh.screen.scrollbar!.offset, canvas.screen.scrollbar!.offset)
+            XCTAssertEqual(fresh.scrollFraction, canvas.scrollFraction)
+            XCTAssertEqual(image(canvas), image(fresh), "Shown pixels at native offset \(offset)")
+        }
+        XCTAssertGreaterThanOrEqual(crossed, 5, "Exercise real row crossings both ways")
+    }
+
+    func testPaintedRowsUseTheWindowScreenScale() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        defer { window.isHidden = true }
+        let canvas = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 300, height: 300))
+        window.addSubview(canvas)
+        window.makeKeyAndVisible()
+        canvas.layoutIfNeeded()
+        XCTAssertEqual(canvas.contentView.contentScaleFactor, window.screen.scale)
+        XCTAssertEqual(canvas.contentScaleFactor, window.screen.scale,
+                       "Fractions and cached rows round to the screen's pixels, not the non-drawing canvas's")
+    }
+
     func testBoundariesAndCancellationCannotContinueAViewportOrInput() throws {
         let (_, model, canvas) = try fixture()
         defer { model.stop() }
@@ -411,13 +531,19 @@ final class TerminalMotionTests: XCTestCase {
         func bitmap(_ view: TerminalCanvasView) -> CGImage {
             let format = UIGraphicsImageRendererFormat()
             format.scale = 2
-            return UIGraphicsImageRenderer(size: view.bounds.size, format: format).image { _ in view.draw(view.bounds) }.cgImage!
+            return UIGraphicsImageRenderer(size: view.bounds.size, format: format).image {
+                view.renderForTesting(in: $0.cgContext, repaint: false)
+            }.cgImage!
         }
         let full = bitmap(reference)
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        move(canvas, to: CGFloat(target) * 18 + 0.5)
+        _ = bitmap(canvas)
+        let draws = canvas.contentDraws
         for fraction: CGFloat in [0.5, 9, 17.5] {
-            canvas.scrollViewWillBeginDragging(canvas.scrollView)
             move(canvas, to: CGFloat(target) * 18 + fraction)
             let actual = bitmap(canvas)
+            XCTAssertEqual(canvas.contentDraws, draws, "Within a row the displayed pixels move without a CPU repaint")
             let crop = CGRect(x: 24, y: 22, width: 640, height: 716)
             let expectedCrop = try XCTUnwrap(full.cropping(to: crop.offsetBy(dx: 0, dy: fraction * 2)))
             let actualCrop = try XCTUnwrap(actual.cropping(to: crop))
