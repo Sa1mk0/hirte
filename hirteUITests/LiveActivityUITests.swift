@@ -7,8 +7,11 @@ final class LiveActivityUITests: XCTestCase {
     func testExplicitFollowAndStop() throws {
         let app = XCUIApplication()
         let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "dark"
-        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", appearance, "-hirte.demo", "YES"]
+        // A real ongoing task: the standard scene completes t1 after 40 seconds.
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", appearance,
+                                "-hirte.demo", "YES", "-hirte.demo.dense", "YES", "-terminals.collapsed", ""]
         app.launch()
+        app.buttons["Terminals"].tap()
         let row = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
         XCTAssertTrue(row.waitForExistence(timeout: 10))
         row.tap()
@@ -67,11 +70,13 @@ final class LiveActivityUITests: XCTestCase {
         let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "dark"
         let app = XCUIApplication()
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US", "-appearance", appearance,
-                                "-hirte.demo", "YES", "-liveActivity.enabled", "YES"]
+                                "-hirte.demo", "YES", "-hirte.demo.dense", "YES",
+                                "-terminals.collapsed", "", "-liveActivity.enabled", "YES"]
         // The demo's terminals keep their identity across runs, as a real machine's do.
         app.launchEnvironment["HIRTE_DEMO_EPOCH_MS"] = String(UInt64(Date().timeIntervalSince1970 * 1000))
         app.launch()
         func openTerminal() {
+            app.buttons["Terminals"].tap()
             let row = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
             XCTAssertTrue(row.waitForExistence(timeout: 10))
             row.tap()
