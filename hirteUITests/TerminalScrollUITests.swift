@@ -121,7 +121,9 @@ final class TerminalScrollUITests: XCTestCase {
         if hint.waitForExistence(timeout: 1) { hint.tap() }
         print("HOLD_PLAIN_FOCUSED=\(app.keyboards.firstMatch.exists)")
         if app.keyboards.firstMatch.exists {
-            app.terminalAction("Hide Keyboard").tap()
+            let hideKeyboard = app.buttons["Hide keyboard"]
+            XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5))
+            hideKeyboard.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         }
         start.press(forDuration: 0.8, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)),
