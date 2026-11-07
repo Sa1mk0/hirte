@@ -39,7 +39,6 @@ struct RootView: View {
         defer { pendingFollowRoute = nil }
         guard let terminal = session.terminal(task.address), task.matches(hostID: session.host.id, terminal: terminal) else { return }
         selectedTerminal = terminal.address
-        follow.terminalOpened(hostID: task.hostID, address: terminal.address)
     }
 
     var body: some View {
@@ -66,8 +65,14 @@ struct RootView: View {
             }
         }
         .navigationSplitViewStyle(.balanced)
-        .task { follow.window(windowID, phase: scenePhase) }
         .onDisappear { follow.removeWindow(windowID) }
+        // A follow that outlived the last run needs its machine connected to keep updating.
+        .task {
+            follow.hostsChanged(Set(hosts.hosts.map(\.id)))
+            guard let id = follow.selection?.hostID,
+                  let host = hosts.hosts.first(where: { $0.id == id }) else { return }
+            sessions.session(for: host).start(keys: keys)
+        }
         .onOpenURL { url in
             guard let task = follow.route(for: url),
                   let host = hosts.hosts.first(where: { $0.id == task.hostID }) else { return }
@@ -102,7 +107,9 @@ struct RootView: View {
                 sessions.remove(id)
             }
         }
-        .onChange(of: scenePhase) { _, phase in
+        // Initial, not a `.task`: one runs later with the phase of its view's body, and could
+        // overwrite a newer `.active` with it. Starting a follow needs an active window.
+        .onChange(of: scenePhase, initial: true) { _, phase in
             follow.window(windowID, phase: phase)
             switch phase {
             case .background: sessions.pauseAll()

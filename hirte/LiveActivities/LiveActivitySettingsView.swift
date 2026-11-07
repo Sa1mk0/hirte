@@ -1,5 +1,6 @@
 import HerdrKit
 import SwiftUI
+import UIKit
 
 /// Embedded by the settings owner. Everything is off until the person opts in.
 struct LiveActivitySettingsView: View {
@@ -15,14 +16,17 @@ struct LiveActivitySettingsView: View {
                 if follow.selection != nil {
                     Button("Stop Following", role: .destructive) { follow.stop() }
                 }
-                if !follow.isAvailable {
-                    Text("Allow Live Activities for Hirte in iOS Settings to start following.")
+            }
+            if !follow.isAvailable {
+                Text("Live Activities are off for Hirte. They have their own switch in iOS Settings, separate from notifications.")
+                if let settings = URL(string: UIApplication.openSettingsURLString) {
+                    Link("Open iOS Settings", destination: settings)
                 }
             }
         } header: {
             Text("Live Activity")
         } footer: {
-            Text("Choose one working agent from its terminal. The activity refreshes while Hirte is open and connected. When you leave Hirte or lose the connection, it shows the last known state. Open Hirte to refresh. If the task changed while you were away, choose it again.")
+            Text("Choose one working agent from its terminal. The activity refreshes while Hirte is open and connected. When you leave Hirte or lose the connection, it shows the last known state. Open Hirte to refresh. If the task changed while you were away, choose it again. The first time, iOS may ask on the Lock Screen whether to allow it.")
         }
     }
 }
@@ -54,9 +58,15 @@ struct LiveActivityFollowActions: View {
     var body: some View {
         if follow.follows(hostID: session.host.id, address: terminal?.address ?? "") {
             Button("Stop Following", role: .destructive) { follow.stop() }
-        } else if follow.enabled, follow.isAvailable, let terminal, FollowTask.canFollow(terminal) {
+        } else if let block = follow.followBlock(session: session, terminal: terminal) {
+            // Offered but dimmed, with the reason: an absent row explains nothing.
+            Button {} label: {
+                Text("Follow on Lock Screen")
+                Text(block)
+            }
+            .disabled(true)
+        } else if let terminal {
             Button("Follow on Lock Screen") { follow.start(session: session, terminal: terminal) }
-                .disabled(session.state != .connected)
         }
         Button("Live Activity Settings…") { showingSettings = true }
     }
@@ -79,6 +89,27 @@ private struct LiveActivityFollowPresentation: ViewModifier {
                 get: { follow.errorMessage != nil }, set: { if !$0 { follow.dismissError() } })) {
                     Button("OK") { follow.dismissError() }
             } message: { Text(follow.errorMessage ?? "") }
+            // The activity shows on the Lock Screen, not here: without this, a tap looks like nothing.
+            .overlay(alignment: .top) {
+                if follow.unconfirmedStart != nil {
+                    Label("Following on the Lock Screen", systemImage: "lock.rectangle.fill")
+                        .font(.footnote.weight(.medium))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(.regularMaterial, in: .capsule)
+                        .padding(.top, 8)
+                        .transition(.opacity)
+                        .accessibilityIdentifier("live-activity-started")
+                }
+            }
+            .animation(.default, value: follow.unconfirmedStart)
+            .sensoryFeedback(.success, trigger: follow.unconfirmedStart) { _, new in new != nil }
+            .task(id: follow.unconfirmedStart) {
+                guard let started = follow.unconfirmedStart else { return }
+                AccessibilityNotification.Announcement("Following on the Lock Screen").post()
+                try? await Task.sleep(for: .seconds(3))
+                if !Task.isCancelled, follow.unconfirmedStart == started { follow.startConfirmed() }
+            }
     }
 }
 

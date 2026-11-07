@@ -10,10 +10,16 @@ final class FollowController {
     static let shared = FollowController()
     static let enabledKey = "liveActivity.enabled"
     static let titleKey = "liveActivity.showTitle"
+    static let followKey = "liveActivity.follow"
 
-    private(set) var selection: FollowTask?
+    /// Kept on this device so the follow outlives a relaunch. Identity only, no terminal content.
+    private(set) var selection: FollowTask? { didSet { persist() } }
     private(set) var lastState: AgentActivityAttributes.ContentState?
     private(set) var errorMessage: String?
+    /// iOS accepted this follow's activity and nothing confirmed it to the person yet.
+    private(set) var unconfirmedStart: UUID?
+    /// The person's Live Activities switch in iOS Settings, kept here so that screens follow it.
+    private(set) var isAvailable: Bool
     var enabled: Bool {
         didSet {
             defaults.set(enabled, forKey: Self.enabledKey)
@@ -39,7 +45,7 @@ final class FollowController {
     private var routes: [UUID: FollowTask] = [:]
     private var operation: Task<Void, Never>?
     private var prepared = false
-    private var observedTurn: UInt64?
+    private var observedTurn: UInt64? { didSet { if observedTurn != oldValue { persist() } } }
     private var needsReconciliation = false
 
     init(
@@ -52,24 +58,73 @@ final class FollowController {
         }
     ) {
         self.defaults = defaults
-        self.driver = driver ?? ActivityKitDriver()
+        let driver = driver ?? ActivityKitDriver()
+        self.driver = driver
+        isAvailable = driver.isAvailable
         self.beginBackgroundTask = beginBackgroundTask
         self.endBackgroundTask = endBackgroundTask
         enabled = defaults.bool(forKey: Self.enabledKey)
         showTitle = defaults.bool(forKey: Self.titleKey)
     }
 
-    var isAvailable: Bool { driver.isAvailable }
-
     func prepare() {
         guard !prepared else { return }
         prepared = true
-        enqueue { await self.driver.removeAll() }
+        driver.observeAvailability { [weak self] in self?.availabilityChanged($0) }
+        if let stored = storedFollow(), let state = driver.restore(id: stored.task.followID) {
+            selection = stored.task
+            observedTurn = stored.observedTurn
+            lastState = state
+            // Whatever happened in between, it isn't known to be the same task until `received` checks.
+            needsReconciliation = true
+            routes[stored.task.followID] = stored.task
+            driver.observeDismissal(dismissed(stored.task))
+        } else {
+            defaults.removeObject(forKey: Self.followKey)
+            enqueue { await self.driver.removeAll() }
+        }
+    }
+
+    private struct StoredFollow: Codable {
+        let task: FollowTask
+        let observedTurn: UInt64?
+    }
+
+    private func persist() {
+        if let selection, let data = try? JSONEncoder().encode(StoredFollow(task: selection, observedTurn: observedTurn)) {
+            defaults.set(data, forKey: Self.followKey)
+        } else {
+            defaults.removeObject(forKey: Self.followKey)
+        }
+    }
+
+    private func storedFollow() -> StoredFollow? {
+        guard enabled, isAvailable, let data = defaults.data(forKey: Self.followKey),
+              let stored = try? JSONDecoder().decode(StoredFollow.self, from: data),
+              Date.now.timeIntervalSince(stored.task.startedAt) < 8 * 60 * 60 else { return nil }
+        return stored
+    }
+
+    private func dismissed(_ task: FollowTask) -> @MainActor () -> Void {
+        { [weak self] in
+            guard let self, self.selection?.followID == task.followID else { return }
+            // Only iOS can do this while Hirte is on screen: nobody can swipe it away from here.
+            if !self.activeWindows.isEmpty, Date.now.timeIntervalSince(task.startedAt) < 10 {
+                self.errorMessage = "iOS removed the Lock Screen activity right after it started. Check Live Activities for Hirte in iOS Settings."
+            }
+            self.stop()
+        }
     }
 
     func window(_ id: UUID, phase: ScenePhase) {
         prepare()
-        if phase == .active { activeWindows.insert(id) } else { activeWindows.remove(id) }
+        if phase == .active {
+            activeWindows.insert(id)
+            // Back from iOS Settings: don't depend on the update stream's timing.
+            availabilityChanged(driver.isAvailable)
+        } else {
+            activeWindows.remove(id)
+        }
         if activeWindows.isEmpty { markLastKnown() }
     }
 
@@ -82,10 +137,27 @@ final class FollowController {
         selection?.hostID == hostID && selection?.address == address
     }
 
+    /// Why this terminal can't be followed now, in words for the person; nil when it can.
+    func followBlock(session: HostSession, terminal: Terminal?) -> String? {
+        guard enabled else { return "Turn on Follow on Lock Screen in Live Activity Settings." }
+        guard isAvailable else { return "Allow Live Activities for Hirte in iOS Settings." }
+        guard session.state == .connected else { return "Connect to this machine to follow." }
+        guard let terminal else { return "This terminal is gone." }
+        return FollowTask.ineligibility(terminal)
+    }
+
     func start(session: HostSession, terminal: Terminal) {
         prepare()
-        guard enabled, isAvailable, !activeWindows.isEmpty,
-              session.state == .connected, FollowTask.canFollow(terminal) else { return }
+        availabilityChanged(driver.isAvailable)
+        // Offered when it was possible, but things may have changed by the tap.
+        if let block = followBlock(session: session, terminal: terminal) {
+            errorMessage = block
+            return
+        }
+        guard !activeWindows.isEmpty else {
+            errorMessage = "Hirte has to be on screen to start following. Open it and try again."
+            return
+        }
         stop()
         let task = FollowTask(hostID: session.host.id, terminal: terminal, now: .now)
         guard case .update(let state) = task.reduce(
@@ -98,34 +170,42 @@ final class FollowController {
         errorMessage = nil
         routes = routes.filter { Date.now.timeIntervalSince($0.value.startedAt) < 8.5 * 60 * 60 }
         routes[task.followID] = task
-        let dismissed: @MainActor () -> Void = { [weak self] in
-            guard self?.selection?.followID == task.followID else { return }
-            self?.stop()
-        }
         enqueue {
             guard self.selection?.followID == task.followID else { return }
             guard self.enabled, !self.activeWindows.isEmpty else {
                 self.selection = nil
                 self.lastState = nil
                 self.source = nil
+                // A menu runs its action after closing, so leaving right after the tap ends up here.
+                if self.enabled { self.errorMessage = "Hirte left the screen before the activity could start. Follow it again." }
                 return
             }
             await self.driver.removeAll()
             do {
                 try self.driver.start(id: task.followID, state: state)
-                self.driver.observeDismissal(dismissed)
+                self.driver.observeDismissal(self.dismissed(task))
+                self.unconfirmedStart = task.followID
             } catch {
                 self.selection = nil
                 self.lastState = nil
                 self.source = nil
-                self.errorMessage = "The Lock Screen activity could not start. Check Live Activities in iOS Settings and try again."
+                self.errorMessage = followStartFailure(error)
             }
         }
     }
 
     func dismissError() { errorMessage = nil }
 
+    func startConfirmed() { unconfirmedStart = nil }
+
+    private func availabilityChanged(_ available: Bool) {
+        isAvailable = available
+        // Turned off in iOS Settings: iOS ends the activity, so don't keep offering to stop it.
+        if !available, selection != nil || completed != nil { stop() }
+    }
+
     func stop() {
+        unconfirmedStart = nil
         completed = nil
         completedPhase = nil
         selection = nil
@@ -133,12 +213,6 @@ final class FollowController {
         source = nil
         // Also removes completed activities, e.g. when opting out or replacing the follow.
         enqueue { await self.driver.removeAll() }
-    }
-
-    func terminalOpened(hostID: UUID, address: String) {
-        if follows(hostID: hostID, address: address) || (completed?.hostID == hostID && completed?.address == address) {
-            stop()
-        }
     }
 
     func hostsChanged(_ ids: Set<UUID>) {
@@ -155,6 +229,8 @@ final class FollowController {
     }
 
     func received(_ session: HostSession, message: EventMessage? = nil) {
+        // A restored follow has no session yet: its machine's, once connected, takes it up.
+        if source == nil, selection?.hostID == session.host.id { source = session }
         guard source === session else { return }
         if let completed {
             if case .event(let event) = message, event.terminal == completed.address {
