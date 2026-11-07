@@ -34,7 +34,7 @@ extension XCUIApplication {
     /// The bottom of the list's title: nothing of the list starts above it.
     @MainActor
     var sidebarTitleBottom: CGFloat {
-        navigationBars.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Demo machine'")).firstMatch.frame.maxY
+        navigationBars["Demo machine"].frame.maxY
     }
 
     /// The top of the bar over the list's end, its gap above the controls included: what's below
