@@ -86,7 +86,9 @@ final class TerminalMotionTests: XCTestCase {
         XCTAssertEqual(clip.frame, CGRect(x: 0, y: 10, width: 500, height: 20 * 18),
                        "The clip is exactly the original grid: nothing above or below it is masked")
         for (step, fraction) in [CGFloat(1.5), 4.25, 9.5, 17.5, 3].enumerated() {
+            canvas.layoutIfNeeded()
             move(canvas, to: base + fraction)
+            XCTAssertFalse(canvas.layer.needsLayout(), "A fraction alone must not lay out the canvas again")
             XCTAssertFalse(content.layer.needsDisplay(), "A fraction alone must not repaint")
             canvas.layoutIfNeeded()
             content.layer.displayIfNeeded()

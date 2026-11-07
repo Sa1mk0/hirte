@@ -119,8 +119,8 @@ final class TerminalCanvasView: UIView, UITextInput {
     // UIKit owns gesture tracking and time-based deceleration. The canvas stays fixed;
     // only a viewport of cells (plus one real overscan row) is ever materialized.
     let scrollView = UIScrollView()
-    /// The painted rows (see `TerminalContentView`). A fractional scroll moves `contentClip`'s
-    /// bounds, like a scroll view moves its content: no CPU repaint of unchanged rows.
+    /// The painted rows (see `TerminalContentView`). A fractional scroll moves them with a layer
+    /// transform of `contentClip`: no CPU repaint of unchanged rows, and no UIView geometry change.
     let contentView = TerminalContentView()
     private let contentClip = UIView()
     private let scrollThumb = UIView()
@@ -298,6 +298,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         super.layoutSubviews()
         #if DEBUG
         TerminalScrollTrace.shared?.attach(self)
+        TerminalScrollTrace.shared?.record("layout")
         #endif
         synchronizeScrolling()
         reportGridSize(force: false)
@@ -322,6 +323,9 @@ final class TerminalCanvasView: UIView, UITextInput {
 
     /// Places the painted rows: a pure fraction moves them, it never repaints them. The rows'
     /// window (and its real overscan row below) is clipped only while history shows one.
+    /// The rows' clip keeps its bounds while scrolling: changing them (or a subview layer's
+    /// transform) makes UIKit lay out the canvas again on every native callback. The fraction is
+    /// the clip layer's `sublayerTransform` instead; the scrollbar's frame origin is harmless.
     private func layoutContent() {
         let g = geometry()
         let window = CGRect(x: 0, y: g.origin.y, width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight)
@@ -329,21 +333,34 @@ final class TerminalCanvasView: UIView, UITextInput {
         // Keyboard notifications and SwiftUI updates can arrive inside animation blocks.
         UIView.performWithoutAnimation {
             if contentClip.frame != window { contentClip.frame = window }
-            let origin = CGPoint(x: 0, y: window.minY + scrollFraction)
+            let origin = CGPoint(x: 0, y: window.minY)
             if contentClip.bounds.origin != origin { contentClip.bounds.origin = origin }
-            contentClip.clipsToBounds = screen.lineBelow != nil
+            if contentClip.clipsToBounds != (screen.lineBelow != nil) { contentClip.clipsToBounds = screen.lineBelow != nil }
             let size = CGSize(width: bounds.width, height: bounds.height + g.cellHeight)
             if contentView.frame != CGRect(origin: .zero, size: size) {
                 contentView.frame = CGRect(origin: .zero, size: size)
                 contentView.setNeedsDisplay()
             }
-            scrollThumb.isHidden = thumb == nil || pinchSnapshot != nil
+            if scrollThumb.isHidden != (thumb == nil || pinchSnapshot != nil) {
+                scrollThumb.isHidden = thumb == nil || pinchSnapshot != nil
+            }
             if let thumb {
-                scrollThumb.frame = thumb
-                scrollThumb.layer.cornerRadius = thumb.width / 2
-                scrollThumb.backgroundColor = UIColor(screen.foreground).withAlphaComponent(0.45)
+                // Its frame, not a transform: a UIView layer's transform lays out the canvas again.
+                if scrollThumb.frame != thumb {
+                    scrollThumb.frame = thumb
+                    scrollThumb.layer.cornerRadius = thumb.width / 2
+                }
+                let color = UIColor(screen.foreground).withAlphaComponent(0.45)
+                if scrollThumb.backgroundColor != color { scrollThumb.backgroundColor = color }
             }
         }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let shift = CATransform3DMakeTranslation(0, -scrollFraction, 0)
+        if !CATransform3DEqualToTransform(contentClip.layer.sublayerTransform, shift) {
+            contentClip.layer.sublayerTransform = shift
+        }
+        CATransaction.commit()
         #if DEBUG
         if presentedFraction != scrollFraction || presentedRow != screen.scrollbar?.offset {
             presentedFraction = scrollFraction
