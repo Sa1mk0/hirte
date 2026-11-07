@@ -36,7 +36,11 @@ final class TerminalMotionTests: XCTestCase {
             for sample in 1...hz {
                 let target = start - CGFloat(sample) * 213.5 / CGFloat(hz)
                 move(canvas, to: target)
-                XCTAssertEqual(visibleOffset(canvas), (target * 2).rounded() / 2, accuracy: 0.001)
+                let native = canvas.scrollView.contentOffset.y
+                XCTAssertEqual(visibleOffset(canvas), (native * canvas.contentScaleFactor).rounded() / canvas.contentScaleFactor,
+                               accuracy: 0.001, "Draw the native offset aligned to canvas pixels")
+                XCTAssertEqual(native, target, accuracy: 1 / canvas.traitCollection.displayScale,
+                               "UIKit may align the requested offset to its screen's pixels")
                 // SwiftUI echo must not reset native subpixel position or cancel its gesture.
                 let nativeOffset = canvas.scrollView.contentOffset.y
                 canvas.screen = model.frame
@@ -270,7 +274,8 @@ final class TerminalMotionTests: XCTestCase {
             }
             XCTAssertEqual(canvas.screen.text, anchor, "Appending must retain the historical anchor")
             XCTAssertEqual(canvas.scrollFraction, fraction)
-            XCTAssertEqual(canvas.scrollView.contentOffset.y, CGFloat(canvas.screen.scrollbar!.offset) * 18 + fraction)
+            XCTAssertEqual(canvas.scrollView.contentOffset.y, CGFloat(canvas.screen.scrollbar!.offset) * 18 + fraction,
+                           accuracy: 1 / canvas.traitCollection.displayScale)
             let next = canvas.screen.scrollbar!.offset
             if next < offset {
                 print("PRUNE_REBASE total=\(canvas.screen.scrollbar!.total) old_offset=\(offset) new_offset=\(next) fraction=\(fraction) anchor_preserved=\(canvas.screen.text == anchor)")

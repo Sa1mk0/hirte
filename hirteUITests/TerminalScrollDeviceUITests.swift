@@ -19,6 +19,14 @@ final class TerminalScrollDeviceUITests: XCTestCase {
         agents.tap()
         let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
         XCTAssertTrue(first.waitForExistence(timeout: 5))
+        for _ in 0..<4 {
+            if first.frame.maxY < agents.frame.minY - 12 { break }
+            let start = app.collectionViews.firstMatch.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.65))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: -120)),
+                        withVelocity: XCUIGestureVelocity(rawValue: 160), thenHoldForDuration: 0.3)
+        }
+        XCTAssertLessThan(first.frame.maxY, agents.frame.minY - 12, "Reveal the row above the navigation bar")
+        XCTAssertTrue(first.isHittable)
         first.tap()
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
