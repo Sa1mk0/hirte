@@ -91,7 +91,15 @@ final class LiveActivityUITests: XCTestCase {
         assertFollowing("following after the tap")
 
         // Viewing the terminal is not Stop Following.
-        app.navigationBars.buttons["BackButton"].firstMatch.tap()
+        let back = app.navigationBars.buttons["BackButton"].firstMatch
+        if back.exists {
+            back.tap()
+        } else {
+            // Beside the sidebar there is no Back button: select another terminal first.
+            let other = app.descendants(matching: .any).matching(identifier: "t3").firstMatch
+            XCTAssertTrue(other.waitForExistence(timeout: 5))
+            other.tap()
+        }
         openTerminal()
         assertFollowing("still following after opening its terminal again")
 
