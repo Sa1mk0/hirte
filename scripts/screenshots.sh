@@ -32,7 +32,7 @@ case "$device_type" in
     *) font=17 ;;
 esac
 TEST_RUNNER_HIRTE_SHOTS="$PWD/$raw" TEST_RUNNER_HIRTE_SHOT_FONT="$font" xcodebuild -project hirte.xcodeproj -scheme hirte -derivedDataPath .build/xcode \
-    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-com.pavelzw}" \
+    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-io.github.sa1mk0}" \
     -destination "id=$device" -only-testing:hirteUITests/DemoTourTests test | xcbeautify --quiet
 
 # Frame: caption on Hirte's charcoal, the screenshot below with rounded corners. The output has

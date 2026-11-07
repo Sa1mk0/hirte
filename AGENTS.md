@@ -27,8 +27,8 @@ App tests: `xcodebuild … -only-testing:hirteTests test` (unit) or `-only-testi
 
 ## Conventions and pitfalls
 
-- **Two apps.** Debug builds are "Hirte Dev" (`com.pavelzw.hirte.dev`, amber icon), Release is
-  "Hirte" (`com.pavelzw.hirte`). They differ through project-level `HIRTE_*_SUFFIX` settings.
+- **Two apps.** In this TestFlight edition, Debug builds are "Hirte Preview Dev"
+  (`io.github.sa1mk0.hirte.dev`, amber icon), Release is "Hirte Preview" (`io.github.sa1mk0.hirte`). They differ through project-level `HIRTE_*_SUFFIX` settings.
 - **Signing**: `DEVELOPMENT_TEAM` and `HIRTE_BUNDLE_ID_PREFIX` are set once, at project level (not
   per target). The justfile and `scripts/screenshots.sh` pass `HIRTE_TEAM` / `HIRTE_BUNDLE_ID_PREFIX`
   from the environment over them, so others build with their own team without editing tracked files.

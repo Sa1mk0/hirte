@@ -8,14 +8,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 device="${HIRTE_DEVICE:-$(just _device)}"
-bundle="${HIRTE_BUNDLE_ID_PREFIX:-com.pavelzw}.hirte.dev"
+bundle="${HIRTE_BUNDLE_ID_PREFIX:-io.github.sa1mk0}.hirte.dev"
 out=.build/video/device
 name=tour
 rm -rf "$out"
 mkdir -p "$out"
 
 xcodebuild=(xcodebuild -project hirte.xcodeproj -scheme hirte -derivedDataPath .build/xcode -allowProvisioningUpdates
-    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-com.pavelzw}"
+    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-io.github.sa1mk0}"
     -destination "id=$device" -only-testing:hirteUITests/DemoTourTests/testDeviceVideoTour)
 "${xcodebuild[@]}" build-for-testing | xcbeautify --quiet
 TEST_RUNNER_HIRTE_DEVICE_VIDEO="$name" ${HIRTE_SHOT_FONT:+TEST_RUNNER_HIRTE_SHOT_FONT=$HIRTE_SHOT_FONT} \
