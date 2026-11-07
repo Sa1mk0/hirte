@@ -77,6 +77,19 @@ struct FollowTaskTests {
         #expect(followStartFailure(NSError(domain: "Test", code: 1)).contains("could not start"))
     }
 
+    @Test func lostSessionCannotOfferANewFollow() throws {
+        var lost = try terminal()
+        // EventState's `lost` update retains state == live and the last agent status.
+        lost.reason = "lost"
+        #expect(lost.isLive)
+        #expect(!FollowTask.canFollow(lost))
+        #expect(FollowTask.ineligibility(lost) == "This terminal session is no longer available.")
+        lost.reason = nil
+        lost.exitCode = 0
+        #expect(!FollowTask.canFollow(lost))
+        #expect(FollowTask.ineligibility(lost) == "This terminal session is no longer available.")
+    }
+
     @Test func phasesRespectReadStateAndBlockedTurn() throws {
         let task = FollowTask(hostID: hostID, terminal: try terminal(), now: now)
         func reduce(_ terminal: Terminal?) -> FollowTask.Reduction {
