@@ -94,15 +94,15 @@ final class TerminalCanvasView: UIView, UITextInput {
             return fingerprint == other.fingerprint && cells == other.cells
         }
     }
-    /// Where the current hold began, while holding (see `ArrowStick`).
+    /// Where the current hold of the space bar's trackpad began (see `ArrowStick`).
     private var stickOrigin: CGPoint?
-    /// The arrow key the held finger points to; nil inside the dead zone.
+    /// The arrow key the trackpad points to; nil inside the dead zone.
     private var stickKey: TerminalKey?
     private var stickSpeed: ArrowStick.Speed = .slow
     /// Whether the key repeats yet (it waits `ArrowStick.repeatDelay` after the first).
     private var stickRepeating = false
     private var stickTimer: Timer?
-    /// Keys sent during this hold; none means it was a plain hold, which offers Paste.
+    /// Keys sent during this hold, to move the arrow pad's lit chevrons along.
     private var stickSent = 0
     private lazy var arrowPad = ArrowPadView()
     /// Text an input method is still composing (see `setMarkedText`); typed once it's done.
@@ -259,9 +259,6 @@ final class TerminalCanvasView: UIView, UITextInput {
         pan.addTarget(self, action: #selector(panned))
         self.pan = pan
         addGestureRecognizer(edgeSwipe)
-        let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed))
-        press.minimumPressDuration = 0.35
-        addGestureRecognizer(press)
         addInteraction(editMenu)
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(keyboardWillChange(_:)),
@@ -877,30 +874,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
     }
 
-    /// Hold, then drag for arrow keys (see `ArrowStick`); hold and let go without dragging for Paste.
-    @objc private func longPressed(_ press: UILongPressGestureRecognizer) {
-        guard model != nil else { return }
-        if press.state == .began { cancelScrolling(resetFraction: false) }
-        let point = press.location(in: self)
-        switch press.state {
-        case .began:
-            beginStick(at: point)
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        case .changed:
-            moveStick(to: point)
-        case .ended:
-            let sent = stickSent
-            endStick()
-            if sent == 0, UIPasteboard.general.hasStrings {
-                menuLink = nil
-                editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
-            }
-        default:
-            endStick()
-        }
-    }
-
-    /// Starts a hold at a point: from a finger on the screen, or the space bar's trackpad.
+    /// Starts a hold of the space bar's trackpad at a point.
     private func beginStick(at point: CGPoint) {
         editMenu.dismissMenu()
         stickTimer?.invalidate()
@@ -1352,6 +1326,7 @@ extension TerminalCanvasView: UIEditMenuInteractionDelegate {
             })
             return UIMenu(title: url.absoluteString, children: actions)
         }
+        // No link: UIKit presents the menu itself on a pointer's secondary click.
         guard UIPasteboard.general.hasStrings else { return nil }
         return UIMenu(children: [
             UIAction(title: "Paste", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
@@ -1747,7 +1722,7 @@ extension TerminalCanvasView: UIGestureRecognizerDelegate {
 // MARK: Text input
 
 /// Just enough of `UITextInput` for the system keyboard's trackpad: holding the space bar moves a
-/// "floating cursor", which becomes arrow keys like a held finger (see `ArrowStick`). There is no
+/// "floating cursor", which becomes arrow keys (see `ArrowStick`). There is no
 /// text to edit here, so the document is empty and every position is its start.
 extension TerminalCanvasView {
     private final class Position: UITextPosition {}

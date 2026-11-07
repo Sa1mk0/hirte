@@ -96,6 +96,53 @@ final class TerminalScrollUITests: XCTestCase {
         }
     }
 
+    /// Holding the terminal has no action of its own: no menu, and a hold then a drag scrolls.
+    @MainActor
+    func testHoldingTheTerminalOnlyScrolls() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "light"
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+                               "-appearance", appearance, "-hirte.demo", "YES", "-hirte.demo.dense", "YES",
+                               "-terminal.watch", "NO", "-terminal.fontSize", "13"]
+        // Seeds t1 with sample history to scroll back into (DemoDenseScript).
+        app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
+        app.launch()
+        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        first.tap()
+        let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        let start = screen.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.3))
+        start.press(forDuration: 1)
+        XCTAssertFalse(app.menuItems.firstMatch.waitForExistence(timeout: 1))
+        let scrolledBack = app.staticTexts["Scrolled back. Tap to return to the live screen."]
+        XCTAssertFalse(scrolledBack.exists)
+        let held = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        held.name = "hold-plain-" + appearance
+        held.lifetime = .keepAlways
+        add(held)
+        // UIKit may take a still hold as an ordinary tap, which focuses: put the keyboard away.
+        let hint = app.buttons["Continue"]
+        if hint.waitForExistence(timeout: 1) { hint.tap() }
+        print("HOLD_PLAIN_FOCUSED=\(app.keyboards.firstMatch.exists)")
+        if app.keyboards.firstMatch.exists {
+            app.terminalAction("Hide Keyboard").tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        }
+        start.press(forDuration: 0.8, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)),
+                    withVelocity: XCUIGestureVelocity(rawValue: 300), thenHoldForDuration: 0.3)
+        XCTAssertTrue(scrolledBack.waitForExistence(timeout: 3), "A hold then a drag scrolls the history")
+        XCTAssertFalse(app.menuItems.firstMatch.exists)
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "hold-" + appearance
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        if let folder = ProcessInfo.processInfo.environment["HIRTE_SHOTS"] {
+            try XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: folder).appendingPathComponent("hold-" + appearance + ".png"))
+        }
+    }
+
     @MainActor
     func testWatchPinchKeyboardAndEdgeDrag() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
