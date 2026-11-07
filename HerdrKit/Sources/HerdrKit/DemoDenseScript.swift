@@ -142,6 +142,12 @@ enum DemoDenseScript {
         for agent in agents {
             roles[agent.address] = .agent(DemoScript.newAgentPaint(task: agent.title))
         }
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["HIRTE_SCROLL_TRACE"] == "1" {
+            let history = (0..<1000).map { "sample \($0) ready 漢 e\u{301}\r\n" }.joined()
+            roles["t1"] = .shell(history: history, cwd: website)
+        }
+        #endif
         return roles
     }
 

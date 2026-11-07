@@ -126,6 +126,7 @@ final class TerminalScrollLabTests: XCTestCase {
             }
             let canvas = try XCTUnwrap(findCanvas(host.view))
             try await Task.sleep(for: .milliseconds(100))
+            if remote { canvas.scrollViewWillBeginDragging(canvas.scrollView) }
             var draws: [Double] = []
             var callback: [Double] = []
             // Sustain the real Observation → UIKit path for about four seconds at 60 Hz.
@@ -215,7 +216,20 @@ final class TerminalScrollLabTests: XCTestCase {
                                 canvas.draw(canvas.bounds)
                                 scrollMisses = canvas.textRowRasterizations - repeated
                                 XCTAssertEqual(scrollMisses, 1)
+                                let model = TerminalScreenModel(
+                                    theme: TerminalTheme.find(TerminalTheme.defaultDark, dark: true), terminal: terminal)
+                                canvas.model = model
+                                canvas.screen = model.frame
+                                canvas.layoutIfNeeded()
+                                canvas.scrollViewWillBeginDragging(canvas.scrollView)
+                                canvas.scrollView.contentOffset.y -= 0.5
+                                canvas.draw(canvas.bounds)
+                                let fractional = canvas.textRowRasterizations
+                                canvas.draw(canvas.bounds)
+                                XCTAssertEqual(canvas.textRowRasterizations, fractional,
+                                               "The fractional viewport including real overscan must fit too")
                                 XCTAssertLessThanOrEqual(canvas.textRowBytes, 32 * 1024 * 1024)
+                                model.stop()
                             }
                             print("VIEWPORT_CACHE_LAB device=\(name) size=\(size) scale=\(scale) font=\(family.rawValue)/\(fontSize) grid=\(cols)x\(rows) bytes=\(canvas.textRowBytes) unchanged_misses=\(unchangedMisses) scroll_misses=\(scrollMisses)")
                         }

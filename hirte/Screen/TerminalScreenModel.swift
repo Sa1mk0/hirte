@@ -27,6 +27,13 @@ final class TerminalScreenModel {
     /// terminal. The core ignores an observer's typing, so typing attaches again as a viewer.
     private(set) var watching = false
 
+    /// Invalidates an in-flight gesture before detach, takeover, resize or input can retarget it.
+    private(set) var scrollGeneration = 0 {
+        didSet { setScrollActive(false) }
+    }
+    @ObservationIgnored private var scrollActive = false
+    @ObservationIgnored private var scrollOutputPending = false
+    private var stopped = false
     private var vt: VirtualTerminal?
     private var attached: AttachedTerminal?
     private var pump: Task<Void, Never>?
@@ -34,6 +41,7 @@ final class TerminalScreenModel {
     @ObservationIgnored private var interactionRender: Task<Void, Never>?
     #if DEBUG
     @ObservationIgnored private(set) var renderedFrames = 0
+    @ObservationIgnored var sentInputForTesting: ((Data) -> Void)?
     #endif
     @ObservationIgnored private var holdTimeout: Task<Void, Never>?
     /// What this view would like (fits its bounds); sent whenever we act.
@@ -106,11 +114,14 @@ final class TerminalScreenModel {
         self.session = session
         self.address = address
         watching = watch
+        stopped = false
         phase = .attaching
         pump = Task { await run() }
     }
 
     func stop() {
+        stopped = true
+        scrollGeneration &+= 1
         displayLink?.invalidate()
         displayLink = nil
         interactionRender?.cancel()
@@ -129,6 +140,7 @@ final class TerminalScreenModel {
     func setWatching(_ watch: Bool) {
         guard watch != watching else { return }
         watching = watch
+        scrollGeneration &+= 1
         // Watching means not typing: put the keyboard away (bringing it back takes over).
         if watch { wantsKeyboard = false }
         guard pump != nil, phase == .live else { return }
@@ -156,6 +168,8 @@ final class TerminalScreenModel {
             Self.apply(theme, to: vt)
             vt.cellPixels = cellPixels
             self.vt = vt
+            stopped = false
+            scrollGeneration &+= 1
             scrolledBack = false
             phase = .live
             if !observe {
@@ -194,6 +208,7 @@ final class TerminalScreenModel {
     /// The terminal's real size changed (another viewer took over, or our resize applied).
     func remoteSizeChanged(cols: Int, rows: Int) {
         guard let vt, cols > 0, rows > 0, cols != vt.cols || rows != vt.rows else { return }
+        scrollGeneration &+= 1
         vt.resize(cols: cols, rows: rows)
         sendReplies()
         renderNow()
@@ -209,6 +224,7 @@ final class TerminalScreenModel {
     /// Makes our size the terminal's size: resizing counts as activity (not while watching).
     private func claimSize() {
         guard !watching, let attached, let size = preferredSize else { return }
+        scrollGeneration &+= 1
         vt?.resize(cols: size.cols, rows: size.rows)
         // With mode 2048 on, the resize queued a size report: after the RESIZE it describes.
         let replies = vt?.takeReplies() ?? Data()
@@ -278,6 +294,10 @@ final class TerminalScreenModel {
 
     private func send(_ data: Data) {
         guard !data.isEmpty else { return }
+        #if DEBUG
+        sentInputForTesting?(data)
+        TerminalScrollTrace.shared?.record("input", offset: CGFloat(data.count))
+        #endif
         // Typing while watching takes over: attach as a viewer, then send what was typed.
         if watching {
             pendingInput.append(data)
@@ -302,30 +322,59 @@ final class TerminalScreenModel {
 
     // MARK: Scrolling
 
+    enum ScrollRoute { case history, remote, disabled }
+
+    func setScrollActive(_ active: Bool) {
+        scrollActive = active
+        if !active { scrollOutputPending = false }
+    }
+
+    var scrollRoute: ScrollRoute {
+        guard !stopped, phase == .live, let vt else { return .disabled }
+        if watching { return vt.isAlternateScreen ? .disabled : .history }
+        return vt.isMouseTracking || vt.isAlternateScreen ? .remote : .history
+    }
+
+    /// Local gestures publish a matching viewport in the same UIKit callback. Network output
+    /// still uses the existing coalescing/DEC2026 path; remote content is never interpolated.
+    func scrollHistory(to offset: Int) -> ScreenFrame {
+        guard scrollRoute == .history, let vt, let bar = vt.scrollbar else { return frame }
+        let target = min(max(offset, 0), max(bar.total - bar.visible, 0))
+        if target != bar.offset {
+            vt.scroll(by: target - bar.offset)
+            renderNow()
+        }
+        scrolledBack = !(frame.scrollbar?.atBottom ?? true)
+        return frame
+    }
+
     /// A scroll gesture over a cell: to the program (mouse wheel / arrows) or our history.
     /// Watching, only our history scrolls, also under mouse-using programs like coding agents:
     /// sending to the program would take over. (A full-screen program has no history to scroll.)
     func scroll(lines: Int, column: Int, row: Int) {
-        guard let vt, lines != 0 else { return }
+        guard !stopped, let vt, lines != 0 else { return }
         if watching {
             guard !vt.isAlternateScreen else { return }
             vt.scroll(by: lines)
             scrolledBack = true
             return scheduleInteractionRender()
         }
+        let endedHold = vt.renderHoldRemaining != nil
         switch vt.wheel(lines: lines, column: column, row: row) {
         case .scrolledLocally:
             scrolledBack = true
             scheduleInteractionRender()
         case .send(let data):
+            if scrollActive { scrollOutputPending = true }
             send(data)
-            // Wheel input is sent immediately and in the existing byte order. Only the
-            // snapshot is coalesced, together with any output arriving before this turn ends.
-            scheduleInteractionRender()
+            // A remote wheel changes no local cells. Publish only when output arrives,
+            // except when this interaction explicitly ended a synchronized-output hold.
+            if endedHold { scheduleInteractionRender() }
         }
     }
 
     func scroll(toBottom: Bool) {
+        scrollGeneration &+= 1
         vt?.scroll(by: nil)
         scrolledBack = false
         renderNow()
@@ -366,6 +415,13 @@ final class TerminalScreenModel {
 
     /// Coalesces bursts of output into one frame.
     private func scheduleRender() {
+        // One prompt response per wheel batch during a native gesture. The ordinary
+        // display-link batching remains for unrelated/sustained output. Wait for the
+        // DEC2026 boundary before consuming this opportunity, including split writes.
+        if scrollActive, scrollOutputPending, vt?.renderHoldRemaining == nil {
+            scrollOutputPending = false
+            return scheduleInteractionRender()
+        }
         guard displayLink == nil, interactionRender == nil else { return }
         let tick = TerminalRenderTick { [weak self] in self?.renderNow() }
         let link = CADisplayLink(target: tick, selector: #selector(TerminalRenderTick.fire(_:)))
@@ -384,8 +440,11 @@ final class TerminalScreenModel {
         holdTimeout = nil
         guard let vt else { return }
         frame = vt.frame()
+        scrolledBack = !(frame.scrollbar?.atBottom ?? true)
         #if DEBUG
         renderedFrames += 1
+        TerminalScrollTrace.shared?.content("model-content", frame: frame)
+        TerminalScrollTrace.shared?.record("model", offset: CGFloat(frame.scrollbar?.offset ?? 0))
         #endif
         if let remaining = vt.renderHoldRemaining {
             holdTimeout = Task { @MainActor [weak self] in
