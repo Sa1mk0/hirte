@@ -5,7 +5,7 @@ scheme := "hirte"
 # Signing team and bundle ID prefix: the project's (DEVELOPMENT_TEAM, HIRTE_BUNDLE_ID_PREFIX), or
 # your own from HIRTE_TEAM and HIRTE_BUNDLE_ID_PREFIX (see .envrc).
 team := env_var_or_default("HIRTE_TEAM", "")
-bundle_prefix := env_var_or_default("HIRTE_BUNDLE_ID_PREFIX", "com.pavelzw")
+bundle_prefix := env_var_or_default("HIRTE_BUNDLE_ID_PREFIX", "io.github.sa1mk0")
 signing := (if team != "" { " DEVELOPMENT_TEAM=" + team } else { "" }) + " HIRTE_BUNDLE_ID_PREFIX=" + bundle_prefix
 # Debug builds are a separate app ("Hirte Dev"), so they install next to the TestFlight/App Store one.
 bundle_id := bundle_prefix + ".hirte"

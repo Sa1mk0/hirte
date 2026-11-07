@@ -23,7 +23,7 @@ case "$device_type" in
     *) font=17 ;;
 esac
 xcodebuild=(xcodebuild -project hirte.xcodeproj -scheme hirte -derivedDataPath .build/xcode
-    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-com.pavelzw}"
+    ${HIRTE_TEAM:+DEVELOPMENT_TEAM=$HIRTE_TEAM} HIRTE_BUNDLE_ID_PREFIX="${HIRTE_BUNDLE_ID_PREFIX:-io.github.sa1mk0}"
     -destination "id=$device" -only-testing:hirteUITests/DemoTourTests/testVideoTour)
 # Build first, so the recording doesn't wait for the compiler.
 "${xcodebuild[@]}" build-for-testing | xcbeautify --quiet
