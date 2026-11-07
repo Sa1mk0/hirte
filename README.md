@@ -59,6 +59,26 @@ just test      # HerdrKit tests
 To run it on your own iPhone, sign with your team: set `HIRTE_TEAM` and `HIRTE_BUNDLE_ID_PREFIX`
 in `.envrc.local` (see `.envrc`), then `just phone`. `just` lists the other commands.
 
+### Own TestFlight build
+
+This branch builds **Hirte Preview** (`io.github.sa1mk0.hirte`) with a separate Live Activity extension
+and its own standard, dark and tinted app icon. Debug builds use the Preview Dev name and an amber icon.
+The shared contribution remains in the upstream pull request; these distribution settings belong to
+this preview branch.
+
+The local `.envrc.local` selects the signing team and age key. The canonical App Store Connect API key
+is stored in the 1Password `Agents` vault. The local `.appstoreconnect.sops.yaml` is an encrypted copy
+for the existing release recipe; both local files are excluded from Git. With the release
+credentials configured, load the local environment explicitly if direnv is not active:
+
+```sh
+source .envrc.local
+just archive true
+```
+
+The command archives, signs and uploads the current build, then advances the build number for the next
+upload. TestFlight makes the uploaded build available after Apple finishes processing it.
+
 ### Testing locally
 
 `just sim` builds Hirte Dev and launches it in the simulator through Xcode's DeviceHub app.
