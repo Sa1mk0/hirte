@@ -59,6 +59,10 @@ build:
 archive upload="false":
     #!/usr/bin/env bash
     set -euo pipefail
+    if [ -z "{{team}}" ]; then
+        echo "Set HIRTE_TEAM to your Apple Developer team before archiving this TestFlight edition." >&2
+        exit 1
+    fi
     test -d HerdrKit/Frameworks/ghostty-vt.xcframework || just ghostty
     project=hirte.xcodeproj/project.xcproj
     builds="$(grep -o '"CURRENT_PROJECT_VERSION": "[0-9]*"' "$project" | sort -u)"
