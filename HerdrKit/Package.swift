@@ -12,10 +12,16 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/orlandos-nl/Citadel", from: "0.12.1"),
+        // Already used by Citadel; KeyStore needs its RSA keys.
+        .package(url: "https://github.com/apple/swift-crypto", from: "3.12.3"),
     ],
     targets: [
-        .target(name: "KeyStore"),
-        .target(name: "SSHTransport", dependencies: ["KeyStore", .product(name: "Citadel", package: "Citadel")]),
+        .target(name: "KeyStore", dependencies: [.product(name: "_CryptoExtras", package: "swift-crypto")]),
+        .target(name: "SSHTransport", dependencies: [
+            "KeyStore",
+            .product(name: "Citadel", package: "Citadel"),
+            .product(name: "_CryptoExtras", package: "swift-crypto"),
+        ]),
         // Built by `just ghostty` from vendor/ghostty (not checked in).
         .binaryTarget(name: "GhosttyVt", path: "Frameworks/ghostty-vt.xcframework"),
         .target(name: "TerminalCore", dependencies: ["GhosttyVt"]),

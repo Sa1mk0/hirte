@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 /// Walks through the demo machine. Set HIRTE_SHOTS (TEST_RUNNER_HIRTE_SHOTS for xcodebuild)
@@ -532,6 +533,137 @@ final class DemoTourTests: XCTestCase {
             .waitForExistence(timeout: 5), "a license's text shows")
         shot(app, "settings-license-ghostty")
     }
+
+    /// Keys: create an Ed25519 key, import a passphrase-protected one, look at both.
+    @MainActor
+    func testKeys() throws {
+        let app = XCUIApplication()
+        app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
+        app.launch()
+        startDemo(app)
+        app.navigationBars.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Demo machine'")).firstMatch.tap()
+        app.buttons["Manage Machines…"].tap()
+        let keysButton = app.buttons["Keys"]
+        XCTAssertTrue(keysButton.waitForExistence(timeout: 5))
+        keysButton.tap()
+
+        // Create
+        let newKey = app.buttons["new-key"]
+        XCTAssertTrue(newKey.waitForExistence(timeout: 5))
+        // Leftovers from an earlier run that failed halfway.
+        for label in ["ui test ed25519", "laptop"] {
+            while app.staticTexts[label].firstMatch.exists { deleteKey(app, label) }
+        }
+        shot(app, "keys-empty")
+        newKey.tap()
+        app.buttons["menu-create-key"].tap()
+        XCTAssertTrue(app.staticTexts["Security Key (FIDO2)"].waitForExistence(timeout: 5))
+        shot(app, "keys-new")
+        app.staticTexts["Security Key (FIDO2)"].tap()
+        shot(app, "keys-new-security-key")
+        app.staticTexts["Ed25519"].tap()
+        let name = app.textFields["Name"]
+        name.tap()
+        name.press(forDuration: 1)
+        if app.menuItems["Select All"].waitForExistence(timeout: 2) { app.menuItems["Select All"].tap() }
+        name.typeText("ui test ed25519")
+        app.buttons["Create"].tap()
+        XCTAssertTrue(app.staticTexts["ui test ed25519"].waitForExistence(timeout: 5), "the new key is listed")
+
+        // Import
+        newKey.tap()
+        app.buttons["menu-import-key"].tap()
+        let text = app.textViews["import-key-text"]
+        XCTAssertTrue(text.waitForExistence(timeout: 5))
+        shot(app, "keys-import-empty")
+        UIPasteboard.general.string = Self.fixtureKey
+        app.buttons["Paste"].firstMatch.tap()
+        shot(app, "keys-import-pasted")
+        let passphrase = app.secureTextFields["import-key-passphrase"]
+        XCTAssertTrue(passphrase.waitForExistence(timeout: 5), "asks for the passphrase")
+        XCTAssertFalse(app.buttons["Import"].firstMatch.isEnabled, "Import waits for the passphrase")
+        passphrase.tap()
+        passphrase.typeText("wrong\n")
+        XCTAssertTrue(app.staticTexts["The passphrase is wrong."].waitForExistence(timeout: 10))
+        shot(app, "keys-import-wrong-passphrase")
+        passphrase.tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
+        app.staticTexts["Only used to decrypt the key now. Hirte keeps the key itself, without the passphrase."].tap()
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "tapping outside closes the keyboard")
+        passphrase.tap()
+        // Return imports (the Import button can be off screen behind the keyboard on the Duo).
+        passphrase.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: 5) + "hirte\n")
+        let imported = app.staticTexts["laptop"]
+        XCTAssertTrue(imported.waitForExistence(timeout: 10), "the imported key is listed under its comment")
+        shot(app, "keys-list")
+        imported.firstMatch.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS 'aqST3fqABUeUXNjo2Gqk' OR value CONTAINS 'aqST3fqABUeUXNjo2Gqk'")).firstMatch
+            .waitForExistence(timeout: 5), "the public key matches ssh-keygen's")
+        shot(app, "keys-detail-imported")
+
+        // Clean up: delete both keys.
+        back(app)
+        deleteKey(app, "laptop")
+        deleteKey(app, "ui test ed25519")
+        XCTAssertFalse(app.staticTexts["laptop"].exists)
+    }
+
+    @MainActor
+    private func deleteKey(_ app: XCUIApplication, _ label: String) {
+        let row = app.staticTexts[label].firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5))
+        row.tap()
+        let delete = app.buttons["Delete Key"]
+        for _ in 0..<4 where !delete.isHittable { app.swipeUp() }
+        delete.tap()
+        let confirm = app.buttons["Delete"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        sleep(1)
+    }
+
+    /// A throwaway RSA key (passphrase "hirte", comment "laptop"): long enough to scroll.
+    private static let fixtureKey = """
+        -----BEGIN OPENSSH PRIVATE KEY-----
+        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
+        V1dqBw==
+        -----END OPENSSH PRIVATE KEY-----
+        """
 
     /// The appearance setting reaches sheets too, and switching it applies at once (also back to System).
     @MainActor

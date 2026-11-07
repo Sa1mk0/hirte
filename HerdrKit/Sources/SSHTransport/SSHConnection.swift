@@ -41,11 +41,7 @@ public final class SSHConnection: @unchecked Sendable {
         onUnknownHost: @escaping UnknownHostHandler,
         timeout: TimeAmount = .seconds(15)
     ) async throws -> SSHConnection {
-        let privateKey: NIOSSHPrivateKey =
-            switch key {
-            case .secureEnclave(let key): NIOSSHPrivateKey(secureEnclaveP256Key: key)
-            case .software(let key): NIOSSHPrivateKey(p256Key: key)
-            }
+        let privateKey = key.nioSSHKey
         let client = try await SSHClient.connect(
             host: target.host,
             port: target.port,

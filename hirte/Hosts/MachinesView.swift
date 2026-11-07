@@ -231,6 +231,7 @@ struct HostEditor: View {
                 }
             }
             .navigationTitle(hosts.hosts.contains { $0.id == host.id } ? "Edit Machine" : "Add Machine")
+            .dismissesKeyboardOnTapOutside()
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
                 port = host.target.port == 22 ? "" : String(host.target.port)

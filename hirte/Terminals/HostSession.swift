@@ -211,11 +211,16 @@ final class HostSession {
             signingKey = try await keys.signingKey(for: keyInfo)
         }
         state = .connecting(snapshot == nil ? "Connecting to \(host.target.host)…" : "Reconnecting…")
-        let ssh = try await SSHConnection.connect(
-            to: host.target, key: signingKey!, knownHosts: knownHosts,
-            onUnknownHost: { [weak self] offered in
-                await self?.askToTrust(offered) ?? false
-            })
+        let ssh: SSHConnection
+        do {
+            ssh = try await SSHConnection.connect(
+                to: host.target, key: signingKey!, knownHosts: knownHosts,
+                onUnknownHost: { [weak self] offered in
+                    await self?.askToTrust(offered) ?? false
+                })
+        } catch SSHTransportError.authenticationFailed where keyInfo.kind == .securityKey {
+            throw SessionError.securityKeyRejected
+        }
         self.ssh = ssh
 
         state = .connecting("Starting herdr-core…")
@@ -315,7 +320,9 @@ final class HostSession {
     /// Network trouble is retried; problems a person must fix are not.
     private static func isRetryable(_ error: Error) -> Bool {
         switch error {
-        case is SessionError: return error as? SessionError != .noKey
+        case is SessionError: return error as? SessionError == .connectionLost || error as? SessionError == .timedOut
+        // Retrying would ask for the security key again and again.
+        case is SecurityKeyPromptError, is SecurityKeyError: return false
         case SSHTransportError.commandFailed, SSHTransportError.authenticationFailed,
              SSHTransportError.hostKeyChanged, SSHTransportError.hostKeyRejected:
             return false
@@ -342,9 +349,13 @@ enum SessionError: LocalizedError, Equatable {
     case noKey
     case connectionLost
     case timedOut
+    case securityKeyRejected
 
     var errorDescription: String? {
         switch self {
+        case .securityKeyRejected:
+            "The machine didn't accept the security key. Is its public key in ~/.ssh/authorized_keys, "
+                + "and does /etc/ssh/sshd_config contain “\(WebAuthnSetup.sshdLine)”?"
         case .noKey: "This machine has no SSH key selected. Edit it and pick one."
         case .connectionLost: "The connection was lost."
         case .timedOut: "The machine stopped answering."

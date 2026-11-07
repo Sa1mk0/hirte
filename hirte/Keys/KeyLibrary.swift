@@ -10,6 +10,7 @@ final class KeyLibrary {
     var lastError: String?
 
     private let store: KeyStore
+    let securityKeys = SecurityKeyAuthenticator()
 
     init(store: KeyStore = KeyStore()) {
         self.store = store
@@ -22,10 +23,39 @@ final class KeyLibrary {
         keys.first { $0.id == id }
     }
 
+    /// What `generate` can make.
+    enum NewKeyType: String, CaseIterable, Identifiable {
+        case secureEnclave, ed25519, securityKey
+        var id: Self { self }
+    }
+
     @discardableResult
-    func generate(label: String, requireBiometry: Bool) -> SSHKeyInfo? {
+    func generate(_ type: NewKeyType, label: String, requireBiometry: Bool) async -> SSHKeyInfo? {
         do {
-            let info = try store.generateKey(label: label, requireBiometry: requireBiometry)
+            let info: SSHKeyInfo
+            switch type {
+            case .secureEnclave:
+                info = try store.generateKey(label: label, requireBiometry: requireBiometry && hasSecureEnclave)
+            case .ed25519:
+                info = try store.generateEd25519Key(label: label, requireBiometry: requireBiometry)
+            case .securityKey:
+                let registration = try await securityKeys.register(name: label)
+                info = try store.addSecurityKey(registration, label: label)
+            }
+            reload()
+            return info
+        } catch SecurityKeyPromptError.cancelled {
+            return nil
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func importKey(_ key: ParsedPrivateKey, label: String, requireBiometry: Bool) -> SSHKeyInfo? {
+        do {
+            let info = try store.importKey(key, label: label, requireBiometry: requireBiometry)
             reload()
             return info
         } catch {
@@ -53,7 +83,8 @@ final class KeyLibrary {
     }
 
     /// Loads the private key, asking for Face ID first if the key needs it, so the
-    /// prompt does not appear in the middle of the SSH handshake.
+    /// prompt does not appear in the middle of the SSH handshake. A security key is
+    /// asked to sign during the handshake itself.
     func signingKey(for key: SSHKeyInfo) async throws -> SigningKey {
         var context: LAContext?
         if key.requiresBiometry {
@@ -63,7 +94,10 @@ final class KeyLibrary {
                 localizedReason: "Unlock “\(key.label)” to connect")
             context = unlock
         }
-        return try store.signingKey(for: key.id, authenticationContext: context)
+        let securityKeys = securityKeys
+        return try store.signingKey(for: key.id, authenticationContext: context) { credentialID, challenge in
+            try await securityKeys.assert(credentialID: credentialID, challenge: challenge)
+        }
     }
 
     private func reload() {

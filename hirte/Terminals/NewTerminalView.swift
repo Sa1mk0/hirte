@@ -136,6 +136,7 @@ struct NewTerminalView: View {
                 }
             }
             .navigationTitle("New Terminal")
+            .dismissesKeyboardOnTapOutside()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
