@@ -18,9 +18,7 @@ final class TerminalScrollUITests: XCTestCase {
             if let value = env[key], !value.isEmpty { app.launchEnvironment[key] = value }
         }
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier:
             env["HIRTE_COAST_REFERENCE"] == "1" ? "coast-reference" : "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
@@ -70,9 +68,7 @@ final class TerminalScrollUITests: XCTestCase {
             app.launchEnvironment["HIRTE_SCROLL_TUI_MS"] = delay
         }
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         let sidebar = app.collectionViews.firstMatch
@@ -108,9 +104,7 @@ final class TerminalScrollUITests: XCTestCase {
         // Seeds t1 with sample history to scroll back into (DemoDenseScript).
         app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         let start = screen.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.3))
@@ -153,9 +147,7 @@ final class TerminalScrollUITests: XCTestCase {
                                "-terminal.watch", "NO", "-terminal.fontSize", "13"]
         app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         // A vertical drag in the edge zone must still scroll; a horizontal drag hides the list.
@@ -186,5 +178,31 @@ final class TerminalScrollUITests: XCTestCase {
         hide.press(forDuration: 0.05, thenDragTo: hide.withOffset(CGVector(dx: -150, dy: 0)),
                    withVelocity: XCUIGestureVelocity(rawValue: 500), thenHoldForDuration: 0)
         XCTAssertFalse(app.buttons["Agents"].isHittable, "The horizontal edge swipe still hides the sidebar")
+    }
+
+    /// Scrolls the list until the row is wholly between its title and the bar over its end, then
+    /// taps it. On a phone or the Duo it can start under that bar, or below the list's end, where
+    /// it doesn't exist yet.
+    @MainActor
+    private func openRow(_ address: String, in app: XCUIApplication) {
+        let list = app.collectionViews.firstMatch
+        let anyRow = app.descendants(matching: .any).matching(NSPredicate(format: "identifier MATCHES 't[0-9]+'")).firstMatch
+        XCTAssertTrue(anyRow.waitForExistence(timeout: 10), "The demo's terminals are listed")
+        let row = app.descendants(matching: .any).matching(identifier: address).firstMatch
+        // A row that doesn't exist has an empty frame: check that it exists first.
+        func inView() -> Bool {
+            row.exists && row.frame.minY >= app.sidebarTitleBottom && row.frame.maxY <= app.modeBarTop
+        }
+        for _ in 0..<6 {
+            if inView() { break }
+            let up = !row.exists || row.frame.maxY > app.modeBarTop
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.65 : 0.35))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: up ? -120 : 120)),
+                        withVelocity: XCUIGestureVelocity(rawValue: 160), thenHoldForDuration: 0.3)
+        }
+        XCTAssertTrue(row.exists, "\(address) is listed")
+        XCTAssertTrue(inView(), "\(address) is between the list's title and the bar over its end: \(row.frame)")
+        XCTAssertTrue(row.isHittable)
+        row.tap()
     }
 }
