@@ -78,7 +78,8 @@ source .envrc.local
 just archive true
 ```
 
-The command archives, signs and uploads the current build, then advances the build number for the next
+The command archives without development signing, then uses cloud-managed distribution signing for
+the upload. No registered development device is needed. It advances the build number for the next
 upload. TestFlight makes the uploaded build available after Apple finishes processing it.
 
 ### Testing locally

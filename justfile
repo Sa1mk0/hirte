@@ -91,8 +91,10 @@ archive upload="false":
     grep -q "BEGIN PRIVATE KEY" "$key" || { echo "private_key in {{asc_key_file}} is not a .p8 key." >&2; exit 1; }
     auth=(-authenticationKeyPath "$key" -authenticationKeyID "$key_id" -authenticationKeyIssuerID "$issuer_id")
     rm -rf .build/Hirte.xcarchive .build/export
-    {{xcodebuild}} -configuration Release -destination "generic/platform=iOS" \
-        -archivePath .build/Hirte.xcarchive ${auth[@]+"${auth[@]}"} archive | xcbeautify --quiet
+    # Development signing needs a registered device. Archive unsigned and let export perform
+    # cloud-managed distribution signing, so a new team can upload directly to TestFlight.
+    {{xcodebuild}} -configuration Release -destination "generic/platform=iOS" CODE_SIGNING_ALLOWED=NO \
+        -archivePath .build/Hirte.xcarchive archive | xcbeautify --quiet
     options=.build/ExportOptions.plist
     cp scripts/ExportOptions.plist "$options"
     if [ -n "{{team}}" ]; then plutil -replace teamID -string "{{team}}" "$options"; fi
