@@ -8,7 +8,13 @@ enum DemoScript {
     static let shopAPI = home + "/projects/shop-api"
     static let infra = home + "/projects/infra"
 
-    static let now = UInt64(Date().timeIntervalSince1970 * 1000)
+    static let now: UInt64 = {
+        #if DEBUG
+        // UI tests of what outlives a relaunch: the demo's terminals are otherwise new in each run.
+        if let fixed = ProcessInfo.processInfo.environment["HIRTE_DEMO_EPOCH_MS"].flatMap(UInt64.init) { return fixed }
+        #endif
+        return UInt64(Date().timeIntervalSince1970 * 1000)
+    }()
 
     private static func ago(minutes: UInt64) -> UInt64 { now - minutes * 60_000 }
 

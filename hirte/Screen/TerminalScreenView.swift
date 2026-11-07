@@ -125,7 +125,6 @@ struct TerminalScreenView: View {
         }
         // On screen: its agent counts as read (herdr's shared `herdr.seen`).
         .onAppear {
-            FollowController.shared.terminalOpened(hostID: session.host.id, address: address)
             session.startLooking(at: address)
         }
         .onDisappear {

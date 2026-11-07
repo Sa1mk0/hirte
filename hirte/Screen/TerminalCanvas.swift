@@ -8,6 +8,8 @@ final class TerminalCanvasView: UIView, UITextInput {
     var model: TerminalScreenModel? {
         didSet {
             guard model !== oldValue else { return }
+            oldValue?.setScrollActive(false)
+            cancelScrolling()
             // A new model (after a reconnect) needs the grid size to attach.
             lastGrid = nil
             setNeedsLayout()
@@ -18,12 +20,17 @@ final class TerminalCanvasView: UIView, UITextInput {
         didSet {
             // What shows before (and around) the drawn cells: the screen's own background.
             if screen.background != oldValue.background { backgroundColor = UIColor(screen.background) }
+            synchronizeScrolling()
             invalidate(from: oldValue)
+            #if DEBUG
+            TerminalScrollTrace.shared?.record("canvas", offset: CGFloat(screen.scrollbar?.offset ?? 0))
+            #endif
         }
     }
     var fontSize: CGFloat = 13 {
         didSet {
             guard fontSize != oldValue else { return }
+            cancelScrolling()
             fonts = Fonts(size: fontSize, family: fontFamily)
             // At once: until the new grid reaches the emulator, the old columns don't fit the
             // new font and `geometry()` would shrink it back, which looks like a jump.
@@ -34,6 +41,7 @@ final class TerminalCanvasView: UIView, UITextInput {
     var fontFamily: TerminalFont = .jetBrainsMono {
         didSet {
             guard fontFamily != oldValue else { return }
+            cancelScrolling()
             fonts = Fonts(size: fontSize, family: fontFamily)
             scaledFonts = nil
             reportGridSize(force: true, immediately: true)
@@ -56,6 +64,11 @@ final class TerminalCanvasView: UIView, UITextInput {
     }
     private var textRows: [TextRowKey: TextRow] = [:]
     private(set) var textRowBytes = 0
+    #if DEBUG
+    /// Lab diagnostics: CPU rasterizations, not presented frames.
+    private(set) var textRowRasterizations = 0
+    var didDrawForTesting: (() -> Void)?
+    #endif
     private var textRowUse: UInt64 = 0
     private var textRowConfiguration: TextRowConfiguration?
 
@@ -102,7 +115,24 @@ final class TerminalCanvasView: UIView, UITextInput {
     private var menuLink: URL?
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
     private var lastGrid: (cols: Int, rows: Int)?
-    private var scrollRemainder: CGFloat = 0
+    // UIKit owns gesture tracking and time-based deceleration. The canvas stays fixed;
+    // only a viewport of cells (plus one real overscan row) is ever materialized.
+    let scrollView = UIScrollView()
+    private(set) var scrollFraction: CGFloat = 0
+    private var applyingScroll = false
+    // History indices can rebase while output prunes. UIKit's in-flight coordinate and
+    // velocity stay untouched; this origin maps them to the current terminal history.
+    private var historyOrigin: CGFloat = 0
+    private var configuredRoute = TerminalScreenModel.ScrollRoute.disabled
+    private var configuredGeneration = -1
+    private var configuredCellHeight: CGFloat = 0
+    private var configuredSize = CGSize.zero
+    private var motionGeneration: Int?
+    private var remoteRow = 0
+    private var remoteCell = (x: 0, y: 0)
+    private var suppressTap = false
+    private var wasDecelerating = false
+    private static let remoteScrollOrigin: CGFloat = 100_000
     private var pinchStartSize: CGFloat = 13
     /// While pinching, the screen as it was, scaled; nothing is re-laid-out until the fingers lift.
     private var pinchSnapshot: UIView?
@@ -189,15 +219,27 @@ final class TerminalCanvasView: UIView, UITextInput {
         isAccessibilityElement = true
         accessibilityLabel = "Terminal"
         accessibilityIdentifier = "terminal-screen"
-        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped(_:))))
+        scrollView.backgroundColor = .clear
+        scrollView.isOpaque = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.bounces = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.scrollsToTop = false
+        scrollView.keyboardDismissMode = .none
+        scrollView.delaysContentTouches = false
+        scrollView.delegate = self
+        addSubview(scrollView)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        tap.delegate = self
+        addGestureRecognizer(tap)
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(pinched))
         pinch.delegate = self
         addGestureRecognizer(pinch)
         self.pinch = pinch
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned))
+        let pan = scrollView.panGestureRecognizer
         pan.maximumNumberOfTouches = 1
-        pan.delegate = self
-        addGestureRecognizer(pan)
+        pan.addTarget(self, action: #selector(panned))
         self.pan = pan
         addGestureRecognizer(edgeSwipe)
         let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed))
@@ -224,7 +266,9 @@ final class TerminalCanvasView: UIView, UITextInput {
             inset = max(0, bounds.intersection(keyboard).height)
         }
         guard inset != keyboardInset else { return }
+        cancelScrolling()
         keyboardInset = inset
+        synchronizeScrolling()
         setNeedsDisplay()
         reportGridSize(force: false, immediately: true)
     }
@@ -235,8 +279,17 @@ final class TerminalCanvasView: UIView, UITextInput {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        #if DEBUG
+        TerminalScrollTrace.shared?.attach(self)
+        #endif
+        synchronizeScrolling()
         reportGridSize(force: false)
         setNeedsDisplay()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancelScrolling() }
     }
 
     private var pendingGridReport: DispatchWorkItem?
@@ -304,18 +357,21 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
         let visibleRows = Int(usable.height / drawFonts.cellHeight)
         // The cursor's row even when hidden (spinners, coding agents).
-        if screen.rows > visibleRows, let row = screen.cursor?.y ?? screen.cursorRow, row >= visibleRows {
+        if screen.scrollbar?.atBottom != false, screen.rows > visibleRows,
+           let row = screen.cursor?.y ?? screen.cursorRow, row >= visibleRows {
             origin.y -= CGFloat(row - visibleRows + 1) * drawFonts.cellHeight
         }
+        origin.y -= scrollFraction
         return Geometry(origin: origin, fonts: drawFonts)
     }
 
-    /// The cell under a point, clamped to the screen.
-    private func cell(at point: CGPoint) -> (x: Int, y: Int) {
+    /// The cell under a point, including the real partially visible row below the viewport.
+    func cell(at point: CGPoint) -> (x: Int, y: Int) {
         let g = geometry()
         let x = Int((point.x - g.origin.x) / g.cellWidth)
-        let y = Int((point.y - g.origin.y) / g.cellHeight)
-        return (min(max(x, 0), max(screen.cols - 1, 0)), min(max(y, 0), max(screen.rows - 1, 0)))
+        let y = Int(floor((point.y - g.origin.y) / g.cellHeight))
+        let lastRow = screen.rows - 1 + (scrollFraction > 0 && screen.lineBelow != nil ? 1 : 0)
+        return (min(max(x, 0), max(screen.cols - 1, 0)), min(max(y, 0), max(lastRow, 0)))
     }
 
     private func lineRect(_ y: Int, _ g: Geometry) -> CGRect {
@@ -332,6 +388,9 @@ final class TerminalCanvasView: UIView, UITextInput {
             return
         }
         let g = geometry()
+        if old.lineBelow != screen.lineBelow || old.selectionBelow != screen.selectionBelow {
+            setNeedsDisplay(lineRect(screen.rows, g))
+        }
         for y in screen.lines.indices
         where old.lines[y] != screen.lines[y]
             || (old.selection.indices.contains(y) ? old.selection[y] : nil)
@@ -350,6 +409,15 @@ final class TerminalCanvasView: UIView, UITextInput {
 
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("draw-start", state: scrollView.isDecelerating ? 4 : 0,
+            offset: CGFloat(screen.scrollbar?.offset ?? 0) * geometry().cellHeight + scrollFraction)
+        defer {
+            didDrawForTesting?()
+            TerminalScrollTrace.shared?.content("draw-content", frame: screen)
+            TerminalScrollTrace.shared?.record("draw", offset: CGFloat(screen.scrollbar?.offset ?? 0) * geometry().cellHeight + scrollFraction, height: geometry().cellHeight)
+        }
+        #endif
         UIColor(screen.background).setFill()
         context.fill(rect)
         // While pinching, the scaled snapshot shows the screen; drawing under it would show at its edges.
@@ -357,11 +425,19 @@ final class TerminalCanvasView: UIView, UITextInput {
 
         let g = geometry()
         let highlight = UIColor.tintColor.withAlphaComponent(0.4)
-        for (y, line) in screen.lines.enumerated() {
+        context.saveGState()
+        if scrollFraction != 0 {
+            context.clip(to: CGRect(x: 0, y: g.origin.y + scrollFraction,
+                                    width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight))
+        }
+        let rowCount = screen.lines.count + (scrollFraction != 0 && screen.lineBelow != nil ? 1 : 0)
+        for y in 0..<rowCount {
+            let line = y < screen.lines.count ? screen.lines[y] : screen.lineBelow!
             let top = g.origin.y + CGFloat(y) * g.cellHeight
             guard top < rect.maxY, top + g.cellHeight > rect.minY else { continue }
             drawBackgrounds(line, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, in: context)
-            if y < screen.selection.count, let selected = screen.selection[y] {
+            let selection = y < screen.selection.count ? screen.selection[y] : screen.selectionBelow
+            if let selected = selection {
                 highlight.setFill()
                 context.fill(CGRect(
                     x: g.origin.x + CGFloat(selected.lowerBound) * g.cellWidth, y: top,
@@ -369,9 +445,10 @@ final class TerminalCanvasView: UIView, UITextInput {
             }
             drawCachedText(line, top: top, geometry: g)
         }
-        if let cursor = screen.cursor, cursor.y < screen.lines.count {
+        if let cursor = screen.cursor, cursor.y < rowCount {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
         }
+        context.restoreGState()
         if let thumb = scrollbarThumb(screen.scrollbar) {
             UIColor(screen.foreground).withAlphaComponent(0.45).setFill()
             UIBezierPath(roundedRect: thumb, cornerRadius: thumb.width / 2).fill()
@@ -395,6 +472,9 @@ final class TerminalCanvasView: UIView, UITextInput {
             textRows[key] = cached
             image = cached.image
         } else {
+            #if DEBUG
+            textRowRasterizations += 1
+            #endif
             // One point of bleed retains italic edges and descenders. The bitmap is transparent
             // so a selection changing underneath it never requires shaping the text again.
             let size = CGSize(width: ceil(CGFloat(line.count) * g.cellWidth) + 2, height: g.cellHeight + 2)
@@ -409,9 +489,15 @@ final class TerminalCanvasView: UIView, UITextInput {
                 let bytes = bitmap.bytesPerRow * bitmap.height
                 // A strict budget and LRU eviction avoid NSCache's advisory limits and bulk
                 // purges, which caused measurable frame-time spikes during repeated edits.
-                let budget = 12 * 1024 * 1024
+                // A 12 MiB budget cannot hold even one 100×60 iPad viewport at @2:
+                // sequential LRU eviction then rasterizes every row on every draw. Keep
+                // enough for the largest iPad viewport plus a little scroll reuse, bounded
+                // both by bytes and row count (never by the terminal's history length).
+                let budget = 32 * 1024 * 1024
                 if bytes <= budget {
-                    while textRowBytes + bytes > budget || textRows.count >= 160 {
+                    // Comic Mono at 7 pt fits 169 rows on a full 13-inch iPad;
+                    // the row bound must fit that viewport too, not just its bitmap bytes.
+                    while textRowBytes + bytes > budget || textRows.count >= 192 {
                         guard let oldest = textRows.min(by: { $0.value.used < $1.value.used }) else { break }
                         textRowBytes -= oldest.value.bytes
                         textRows.removeValue(forKey: oldest.key)
@@ -430,7 +516,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         // Above the keyboard, like the cells.
         let track = CGRect(x: 0, y: 4, width: bounds.width, height: max(bounds.height - keyboardInset - 8, 0))
         let height = max(track.height * CGFloat(bar.visible) / CGFloat(bar.total), 28)
-        let progress = CGFloat(bar.offset) / CGFloat(bar.total - bar.visible)
+        let progress = (CGFloat(bar.offset) + scrollFraction / geometry().cellHeight) / CGFloat(bar.total - bar.visible)
         return CGRect(x: bounds.maxX - 6, y: track.minY + (track.height - height) * progress, width: 4, height: height)
     }
 
@@ -644,7 +730,8 @@ final class TerminalCanvasView: UIView, UITextInput {
         _ cursor: ScreenCursor, origin: CGPoint, cellWidth: CGFloat, cellHeight: CGFloat, fonts: Fonts,
         in context: CGContext
     ) {
-        let cell = cursor.x < screen.lines[cursor.y].count ? screen.lines[cursor.y][cursor.x] : nil
+        let line = cursor.y < screen.lines.count ? screen.lines[cursor.y] : screen.lineBelow ?? []
+        let cell = line.indices.contains(cursor.x) ? line[cursor.x] : nil
         let width = CGFloat(max(Int(cell?.width ?? 1), 1)) * cellWidth
         let box = CGRect(
             x: origin.x + CGFloat(cursor.x) * cellWidth, y: origin.y + CGFloat(cursor.y) * cellHeight,
@@ -672,23 +759,30 @@ final class TerminalCanvasView: UIView, UITextInput {
     // MARK: Gestures
 
     @objc private func tapped(_ tap: UITapGestureRecognizer) {
-        guard let model else { return }
-        let point = tap.location(in: self)
+        guard !suppressTap else { return }
+        handleTap(at: tap.location(in: self))
+    }
+
+    /// Shared by touch input and focused interaction tests.
+    func handleTap(at point: CGPoint) {
+        guard !suppressTap, let model else { return }
+        cancelScrolling(resetFraction: false)
         editMenu.dismissMenu()
         switch model.tap(at: cell(at: point)) {
         case .link(let url):
             menuLink = url
             editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
-        case .unhandled:
+        case .unhandled, .handled:
+            // Mouse-reporting TUIs still need local text focus after the click. Tapping
+            // while watching deliberately takes over, just like Show Keyboard / typing.
             if !isFirstResponder { _ = becomeFirstResponder() }
-        case .handled:
-            break
         }
     }
 
     /// Hold, then drag for arrow keys (see `ArrowStick`); hold and let go without dragging for Paste.
     @objc private func longPressed(_ press: UILongPressGestureRecognizer) {
         guard model != nil else { return }
+        if press.state == .began { cancelScrolling(resetFraction: false) }
         let point = press.location(in: self)
         switch press.state {
         case .began:
@@ -796,6 +890,7 @@ final class TerminalCanvasView: UIView, UITextInput {
     @objc private func pinched(_ pinch: UIPinchGestureRecognizer) {
         switch pinch.state {
         case .began:
+            cancelScrolling()
             pinching = true
             pinchStartSize = fontSize
             pinchSize = fontSize
@@ -886,21 +981,118 @@ final class TerminalCanvasView: UIView, UITextInput {
     }
 
     @objc private func panned(_ pan: UIPanGestureRecognizer) {
-        guard let model else { return }
         if pan.state == .began {
-            scrollRemainder = 0
-            panStartedLive = !model.scrolledBack
+            panStartedLive = !(model?.scrolledBack ?? false)
+            remoteCell = cell(at: pan.location(in: self))
         }
-        let cellHeight = geometry().cellHeight
-        let dy = pan.translation(in: self).y + scrollRemainder
-        let lines = Int(dy / cellHeight)
-        if lines != 0 {
-            // Finger down moves the content down: that is scrolling up (back).
-            let at = cell(at: pan.location(in: self))
-            model.scroll(lines: -lines, column: at.x, row: at.y)
-            scrollRemainder = dy - CGFloat(lines) * cellHeight
-            pan.setTranslation(.zero, in: self)
+        if pan.state == .changed { remoteCell = cell(at: pan.location(in: self)) }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("pan", state: pan.state.rawValue, touch: pan.location(in: window).y,
+                                           offset: scrollView.contentOffset.y, height: geometry().cellHeight)
+        #endif
+    }
+
+    /// Also called when SwiftUI removes this view. Stops native motion before changing its
+    /// model, grid, font, route or channel; programmatic synchronization must never emit input.
+    func cancelScrolling(resetFraction: Bool = true) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("cancel", state: scrollView.isDecelerating ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
+        motionGeneration = nil
+        model?.setScrollActive(false)
+        wasDecelerating = false
+        let applying = applyingScroll
+        applyingScroll = true
+        scrollView.stopScrollingAndZooming()
+        applyingScroll = applying
+        if resetFraction, scrollFraction != 0 {
+            scrollFraction = 0
+            setNeedsDisplay()
         }
+        if historyOrigin != 0 { synchronizeScrolling() }
+    }
+
+    /// A touch that arrests inertia is consumed, before it can click or take over.
+    func prepareForTouch() {
+        suppressTap = wasDecelerating || scrollView.isDecelerating
+        if suppressTap { cancelScrolling(resetFraction: false) }
+    }
+
+    private func synchronizeScrolling() {
+        guard !applyingScroll else { return }
+        applyingScroll = true
+        defer { applyingScroll = false }
+        let route = cropped ? .disabled : model?.scrollRoute ?? .disabled
+        let generation = model?.scrollGeneration ?? -1
+        let height = geometry().cellHeight
+        let size = CGSize(width: bounds.width, height: max(0, bounds.height - keyboardInset))
+        let changed = route != configuredRoute || generation != configuredGeneration
+            || height != configuredCellHeight || size != configuredSize
+        if changed { cancelScrolling() }
+        configuredRoute = route
+        configuredGeneration = generation
+        configuredCellHeight = height
+        configuredSize = size
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-start", state: scrollView.isDecelerating ? 4 : 0,
+            touch: changed ? 1 : 0, offset: scrollView.contentOffset.y, height: CGFloat(screen.scrollbar?.offset ?? 0))
+        #endif
+        scrollView.frame = CGRect(origin: .zero, size: size)
+        scrollView.isScrollEnabled = route != .disabled && !pinching
+        var offset: CGFloat = 0
+        var extent: CGFloat = 0
+        switch route {
+        case .history:
+            if let bar = screen.scrollbar {
+                extent = CGFloat(max(0, bar.total - bar.visible)) * height
+                if screen.lineBelow == nil { scrollFraction = 0 }
+                offset = min(extent, CGFloat(bar.offset) * height + scrollFraction)
+                if !changed, motionGeneration != nil {
+                    let native = scrollView.contentOffset.y
+                    let row = Int(floor((native + historyOrigin) / height))
+                    historyOrigin += CGFloat(bar.offset - row) * height
+                    offset = native
+                    extent -= historyOrigin
+                } else {
+                    let position = scrollView.contentOffset.y + historyOrigin
+                    historyOrigin = 0
+                    // Canonicalize the raw coordinate, never the rounded draw fraction:
+                    // a fraction rounded up to one row must not advance the next gesture.
+                    if !changed, Int(floor(position / height)) == bar.offset {
+                        offset = position
+                    }
+                }
+            }
+        case .remote:
+            historyOrigin = 0
+            extent = Self.remoteScrollOrigin * 2
+            offset = changed ? Self.remoteScrollOrigin : scrollView.contentOffset.y
+        case .disabled: historyOrigin = 0
+        }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("history-origin", state: scrollView.isDecelerating ? 4 : 0,
+            offset: historyOrigin, height: extent)
+        #endif
+        // Adjust both real bounds in the native coordinate system. On pruning the
+        // extent stays continuous instead of contentSize clamping an in-flight offset.
+        if scrollView.contentInset.top != historyOrigin { scrollView.contentInset.top = historyOrigin }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-size", state: scrollView.isDecelerating ? 4 : 0,
+            touch: scrollView.contentSize.height, offset: scrollView.contentOffset.y, height: size.height + extent)
+        #endif
+        let contentSize = CGSize(width: size.width, height: size.height + extent)
+        if scrollView.contentSize != contentSize { scrollView.contentSize = contentSize }
+        if scrollView.contentOffset.y != offset {
+            #if DEBUG
+            TerminalScrollTrace.shared?.record("sync-offset", state: scrollView.isDecelerating ? 4 : 0,
+                touch: scrollView.contentOffset.y, offset: offset)
+            #endif
+            scrollView.contentOffset = CGPoint(x: 0, y: offset)
+        }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-end", state: scrollView.isDecelerating ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
+        if route == .remote { remoteRow = Int(floor(offset / height)) }
     }
 
     // MARK: Keyboard
@@ -1277,6 +1469,10 @@ struct TerminalCanvas: UIViewRepresentable {
         return view
     }
 
+    static func dismantleUIView(_ view: TerminalCanvasView, coordinator: ()) {
+        view.cancelScrolling()
+    }
+
     func updateUIView(_ view: TerminalCanvasView, context: Context) {
         view.model = model
         view.fontFamily = fontFamily
@@ -1312,6 +1508,98 @@ private final class PaddedLabel: UILabel {
     }
 }
 
+extension TerminalCanvasView: UIScrollViewDelegate {
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        guard let model, model.scrollRoute == configuredRoute, !pinching else {
+            cancelScrolling()
+            return
+        }
+        wasDecelerating = false
+        if configuredRoute == .remote {
+            applyingScroll = true
+            scrollView.contentOffset.y = Self.remoteScrollOrigin
+            remoteRow = Int(floor(Self.remoteScrollOrigin / geometry().cellHeight))
+            applyingScroll = false
+        }
+        motionGeneration = model.scrollGeneration
+        model.setScrollActive(true)
+        remoteCell = cell(at: scrollView.panGestureRecognizer.location(in: self))
+    }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record(applyingScroll ? "native-suppressed" : "native", state: scrollView.isDecelerating ? 4 : 2,
+                                           offset: scrollView.contentOffset.y)
+        #endif
+        guard !applyingScroll else { return }
+        guard let model, motionGeneration == model.scrollGeneration,
+              model.scrollRoute == configuredRoute, !pinching else {
+            cancelScrolling(resetFraction: false)
+            synchronizeScrolling()
+            return
+        }
+        let height = geometry().cellHeight
+        var offset = scrollView.contentOffset.y
+        if configuredRoute == .history { offset += historyOrigin }
+        if configuredRoute == .history, let bar = screen.scrollbar {
+            offset = min(max(offset, 0), CGFloat(max(0, bar.total - bar.visible)) * height)
+        }
+        let row = Int(floor(offset / height))
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("scroll-input", state: scrollView.isDecelerating ? 4 : 2,
+                                           touch: scrollView.panGestureRecognizer.location(in: window).y,
+                                           offset: offset, height: height)
+        #endif
+        applyingScroll = true
+        let previousOrigin = historyOrigin
+        switch configuredRoute {
+        case .history:
+            let frame = model.scrollHistory(by: row - (screen.scrollbar?.offset ?? row))
+            let fraction = ((offset - CGFloat(row) * height) * contentScaleFactor).rounded() / contentScaleFactor
+            scrollFraction = frame.lineBelow == nil ? 0 : max(0, fraction)
+            // Output can rebase the VT between its write and the scheduled snapshot.
+            // Keep that origin shift out of UIKit's native motion, including subpixels.
+            historyOrigin += CGFloat((frame.scrollbar?.offset ?? row) - row) * height
+            screen = frame
+            setNeedsDisplay()
+        case .remote:
+            let lines = row - remoteRow
+            remoteRow = row
+            if lines != 0 { model.scroll(lines: lines, column: remoteCell.x, row: remoteCell.y) }
+        case .disabled: break
+        }
+        applyingScroll = false
+        if historyOrigin != previousOrigin { synchronizeScrolling() }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("offset", state: scrollView.isDecelerating ? 4 : 2,
+                                           touch: scrollView.panGestureRecognizer.location(in: window).y,
+                                           offset: offset, height: height)
+        #endif
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("release", state: decelerate ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
+        wasDecelerating = decelerate
+        if !decelerate {
+            motionGeneration = nil
+            model?.setScrollActive(false)
+            synchronizeScrolling()
+        }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("stop", offset: scrollView.contentOffset.y)
+        #endif
+        wasDecelerating = false
+        motionGeneration = nil
+        model?.setScrollActive(false)
+        synchronizeScrolling()
+    }
+}
+
 extension TerminalCanvasView: UIGestureRecognizerDelegate {
     /// A pinch may start while a one-finger pan runs (the second finger lands a moment later);
     /// otherwise the pan wins and the pinch never begins. The pinch then cancels the pan.
@@ -1327,13 +1615,16 @@ extension TerminalCanvasView: UIGestureRecognizerDelegate {
     /// at once, and scrolling goes on as before.
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
-        shouldRequireFailureOf other: UIGestureRecognizer
+        shouldBeRequiredToFailBy other: UIGestureRecognizer
     ) -> Bool {
-        gestureRecognizer === pan && other === edgeSwipe && edgeSwipe.isEnabled
+        gestureRecognizer === edgeSwipe && other === pan && edgeSwipe.isEnabled
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         if gestureRecognizer === edgeSwipe { edgeTouchStart = touch.location(in: self) }
+        if gestureRecognizer is UITapGestureRecognizer {
+            prepareForTouch()
+        }
         return true
     }
 

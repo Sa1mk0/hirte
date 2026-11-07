@@ -73,6 +73,12 @@ The bottom glass bar contains the Agents/Terminals switch and "+". On a phone, t
 shows its task and context; More contains keyboard, Live Activity and info actions. Watch Only
 remains directly accessible.
 
+Local terminal history follows the finger between rows and uses native deceleration after release.
+History pruning during live output preserves the visible text while it remains in the buffer.
+Mouse-reporting programs receive ordered wheel events and control their own repainting, so their
+scrolling still depends on the program and connection. Tapping a live terminal focuses input even
+when the program uses mouse reporting; tapping while watching explicitly takes over.
+
 Settings → Agents → Agent Overview lets you choose row fields with a live preview. Title and status
 remain visible, and missing context values are omitted. View and Sort in the agent overview provides
 Individual/Nested modes and sorting. Settings → Light Theme / Dark Theme opens the theme gallery;
@@ -82,7 +88,10 @@ Font Mono supplies fallback Nerd Font symbols in the terminal while keeping the 
 Live Activities are local and optional: enable Settings → Live Activity → "Follow on Lock Screen
 (Beta)", then follow a working agent from the terminal menu. Updates arrive while Hirte is open and
 connected. In the background or after a connection loss, the last known state remains visible;
-reopen Hirte to refresh it. This version does not provide reliable background monitoring.
+reopen Hirte to refresh it. Opening the terminal or relaunching Hirte preserves the same follow
+when its terminal and task identity still match. Stop Following, opting out, completion or a new
+terminal instance ends it. The menu explains why following is unavailable; notification permission
+is not required. This version does not provide reliable background monitoring.
 
 ### Optional host context
 

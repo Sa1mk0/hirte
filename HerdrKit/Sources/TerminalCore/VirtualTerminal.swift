@@ -75,6 +75,9 @@ public struct ScreenFrame: Sendable {
     /// Lines whose content changed since the previous frame; nil means everything.
     public var changedLines: IndexSet?
     public var scrollbar: Scrollbar?
+    /// The real row just below the viewport, for a fractional upward shift. Nil at the live bottom.
+    public var lineBelow: [ScreenCell]?
+    public var selectionBelow: ClosedRange<Int>?
     /// The cursor's row in the viewport, also while the program hides the cursor (spinners and
     /// coding agents do): where the action is.
     public var cursorRow: Int?
@@ -149,6 +152,9 @@ public final class VirtualTerminal {
         }
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SIZE, unsafeBitCast(size, to: UnsafeRawPointer.self))
         try check(ghostty_render_state_new(nil, &renderState), "render_state_new")
+        // Pinned libghostty-vt overscan captures real cells without moving the viewport or PTY.
+        var overscan = GhosttyRenderStateOverscan(above: 0, below: 1)
+        try check(ghostty_render_state_set(renderState, GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &overscan), "render_state_overscan")
         try check(ghostty_render_state_row_iterator_new(nil, &rowIterator), "row_iterator_new")
         try check(ghostty_render_state_row_cells_new(nil, &rowCells), "row_cells_new")
         try check(ghostty_key_encoder_new(nil, &keyEncoder), "key_encoder_new")
@@ -289,7 +295,24 @@ public final class VirtualTerminal {
         _ = ghostty_render_state_get(renderState, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &rowIterator)
         var codepoints = [UInt32](repeating: 0, count: 16)
         var y = 0
+        var lineBelow: [ScreenCell]?
+        var selectionBelow: ClosedRange<Int>?
         while ghostty_render_state_row_iterator_next(rowIterator) {
+            var viewportY: Int32 = 0
+            _ = ghostty_render_state_row_get(rowIterator, GHOSTTY_RENDER_STATE_ROW_DATA_VIEWPORT_Y, &viewportY)
+            if viewportY == rows {
+                _ = ghostty_render_state_row_get(rowIterator, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &rowCells)
+                var line: [ScreenCell] = []
+                line.reserveCapacity(cols)
+                while ghostty_render_state_row_cells_next(rowCells) { line.append(readCell(&codepoints)) }
+                lineBelow = line
+                var range = GhosttyRenderStateRowSelection()
+                range.size = MemoryLayout<GhosttyRenderStateRowSelection>.size
+                if ghostty_render_state_row_get(rowIterator, GHOSTTY_RENDER_STATE_ROW_DATA_SELECTION, &range) == GHOSTTY_SUCCESS {
+                    selectionBelow = Int(range.start_x)...Int(range.end_x)
+                }
+                continue
+            }
             var rowDirty = true
             _ = ghostty_render_state_row_get(rowIterator, GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY, &rowDirty)
             if rebuildAll || rowDirty || y >= cachedLines.count {
@@ -322,8 +345,21 @@ public final class VirtualTerminal {
         let lines = cachedLines
         _ = ghostty_render_state_clean(renderState)
 
+        let bar = scrollbar
+        var cursorX: Int?
+        var cursorY: Int?
+        if cursorState.viewport_has_value {
+            cursorX = Int(cursorState.viewport_x)
+            cursorY = Int(cursorState.viewport_y)
+        } else if lineBelow != nil, let bar {
+            var activeX: UInt16 = 0, activeY: UInt16 = 0
+            _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_X, &activeX)
+            _ = ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &activeY)
+            let y = bar.total - rows + Int(activeY) - bar.offset
+            if y == rows { cursorX = Int(activeX); cursorY = y }
+        }
         var cursor: ScreenCursor?
-        if cursorState.visible && cursorState.viewport_has_value {
+        if cursorState.visible, let cursorX, let cursorY {
             let shape: ScreenCursor.Shape =
                 switch cursorState.visual_style {
                 case GHOSTTY_RENDER_STATE_CURSOR_VISUAL_STYLE_BAR: .bar
@@ -332,7 +368,7 @@ public final class VirtualTerminal {
                 default: .block
                 }
             cursor = ScreenCursor(
-                x: Int(cursorState.viewport_x), y: Int(cursorState.viewport_y),
+                x: cursorX, y: cursorY,
                 shape: shape, blinking: cursorState.blinking)
         }
 
@@ -340,7 +376,8 @@ public final class VirtualTerminal {
             cols: cols, rows: rows, lines: lines, cursor: cursor,
             foreground: RGB(colors.foreground), background: RGB(colors.background),
             cursorColor: colors.cursor_has_value ? RGB(colors.cursor) : nil,
-            selection: selection, changedLines: rebuildAll ? nil : changed, scrollbar: scrollbar(),
+            selection: selection, changedLines: rebuildAll ? nil : changed, scrollbar: bar,
+            lineBelow: lineBelow, selectionBelow: selectionBelow,
             cursorRow: cursorState.viewport_has_value ? Int(cursorState.viewport_y) : nil)
     }
 
@@ -512,7 +549,7 @@ public final class VirtualTerminal {
         return Data(bytes: buffer, count: written)
     }
 
-    private func scrollbar() -> Scrollbar? {
+    public var scrollbar: Scrollbar? {
         var bar = GhosttyTerminalScrollbar()
         guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &bar) == GHOSTTY_SUCCESS else {
             return nil
@@ -527,8 +564,11 @@ public final class VirtualTerminal {
         if let ref = gridRef(point), let uri = hyperlinkURI(ref), let url = URL(string: uri) {
             return url
         }
-        guard point.y < frame.lines.count else { return nil }
-        return LinkDetector.links(in: frame.lines[point.y]).first { $0.columns.contains(point.x) }?.url
+        let line: [ScreenCell]
+        if point.y == frame.rows, let below = frame.lineBelow { line = below }
+        else if frame.lines.indices.contains(point.y) { line = frame.lines[point.y] }
+        else { return nil }
+        return LinkDetector.links(in: line).first { $0.columns.contains(point.x) }?.url
     }
 
     private func hyperlinkURI(_ ref: GhosttyGridRef) -> String? {
@@ -604,8 +644,15 @@ public final class VirtualTerminal {
     private func gridRef(_ point: (x: Int, y: Int)) -> GhosttyGridRef? {
         var position = GhosttyPoint()
         position.tag = GHOSTTY_POINT_TAG_VIEWPORT
+        var row = min(max(point.y, 0), rows - 1)
+        // A fractional viewport can expose exactly one real row below it. Use its
+        // screen coordinate for links/selection, never clamp it onto the previous row.
+        if point.y == rows, let bar = scrollbar, !bar.atBottom {
+            position.tag = GHOSTTY_POINT_TAG_SCREEN
+            row = bar.offset + rows
+        }
         position.value.coordinate = GhosttyPointCoordinate(
-            x: UInt16(clamping: min(max(point.x, 0), cols - 1)), y: UInt32(clamping: min(max(point.y, 0), rows - 1)))
+            x: UInt16(clamping: min(max(point.x, 0), cols - 1)), y: UInt32(clamping: row))
         var ref = GhosttyGridRef()
         ref.size = MemoryLayout<GhosttyGridRef>.size
         guard ghostty_terminal_grid_ref(terminal, position, &ref) == GHOSTTY_SUCCESS else { return nil }

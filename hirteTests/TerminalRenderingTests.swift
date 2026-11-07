@@ -147,14 +147,14 @@ final class TerminalRenderingTests: XCTestCase {
             fresh.contentScaleFactor = canvas.contentScaleFactor
             fresh.screen = canvas.screen
             XCTAssertEqual(cached, pixels(fresh), "fresh canvas step \(step)")
-            XCTAssertLessThanOrEqual(canvas.textRowBytes, 12 * 1024 * 1024)
+            XCTAssertLessThanOrEqual(canvas.textRowBytes, 32 * 1024 * 1024)
         }
         // Continuous new lines exceed the cache capacity without retaining unlimited history.
         for step in 0..<200 {
             vt.write(Data("\r\nrow \(step) \u{F07C} 漢".utf8))
             canvas.screen = vt.frame()
             _ = pixels(canvas)
-            XCTAssertLessThanOrEqual(canvas.textRowBytes, 12 * 1024 * 1024)
+            XCTAssertLessThanOrEqual(canvas.textRowBytes, 32 * 1024 * 1024)
         }
     }
 

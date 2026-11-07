@@ -48,6 +48,48 @@ struct FollowTaskTests {
         #expect(FollowTask.canResume(try terminal(state: "done", turn: 5), observedTurn: 4))
     }
 
+    @Test func ineligibilitySaysWhyForEachKindOfTerminal() throws {
+        #expect(FollowTask.ineligibility(try terminal()) == nil)
+        #expect(FollowTask.ineligibility(try terminal(state: "blocked")) == nil)
+        let notNow = "Only a working or waiting agent can be followed."
+        #expect(FollowTask.ineligibility(try terminal(state: "done")) == notNow)
+        #expect(FollowTask.ineligibility(try terminal(state: "idle")) == notNow)
+        #expect(FollowTask.ineligibility(try terminal(state: "error")) == notNow)
+        #expect(FollowTask.ineligibility(try terminal(live: false)) == "This terminal has ended.")
+        // Even with an agent visibly working: the honest reason is its missing identity.
+        #expect(FollowTask.ineligibility(try terminal(created: 0)) == "This terminal has no stable session identity yet. Reconnect to the machine.")
+        let shell = try JSONDecoder().decode(Terminal.self, from: Data(
+            #"{"address":"t1","created_ms":123,"state":"live"}"#.utf8))
+        #expect(FollowTask.ineligibility(shell) == "No agent reports a status in this terminal.")
+    }
+
+    @Test func startFailuresNameTheirCause() {
+        let denied = followStartFailure(ActivityAuthorizationError.denied)
+        #expect(denied.contains("iOS Settings") && !denied.contains("ActivityKit"))
+        let limit = followStartFailure(ActivityAuthorizationError.globalMaximumExceeded)
+        #expect(limit.contains("Too many") && !limit.contains("Settings") && !limit.contains("ActivityKit"))
+        #expect(followStartFailure(ActivityAuthorizationError.targetMaximumExceeded) == limit)
+        #expect(followStartFailure(ActivityAuthorizationError.visibility).contains("on screen"))
+        #expect(followStartFailure(ActivityAuthorizationError.unsupported).contains("can't show"))
+        #expect(followStartFailure(ActivityAuthorizationError.unentitled).contains("isn't allowed"))
+        // Unexpected: only here does the text carry the code, for a report from a device.
+        #expect(followStartFailure(ActivityAuthorizationError.persistenceFailure).contains("ActivityKit: persistenceFailure"))
+        #expect(followStartFailure(NSError(domain: "Test", code: 1)).contains("could not start"))
+    }
+
+    @Test func lostSessionCannotOfferANewFollow() throws {
+        var lost = try terminal()
+        // EventState's `lost` update retains state == live and the last agent status.
+        lost.reason = "lost"
+        #expect(lost.isLive)
+        #expect(!FollowTask.canFollow(lost))
+        #expect(FollowTask.ineligibility(lost) == "This terminal session is no longer available.")
+        lost.reason = nil
+        lost.exitCode = 0
+        #expect(!FollowTask.canFollow(lost))
+        #expect(FollowTask.ineligibility(lost) == "This terminal session is no longer available.")
+    }
+
     @Test func phasesRespectReadStateAndBlockedTurn() throws {
         let task = FollowTask(hostID: hostID, terminal: try terminal(), now: now)
         func reduce(_ terminal: Terminal?) -> FollowTask.Reduction {
@@ -154,6 +196,7 @@ private final class RecordingActivityDriver: LiveActivityDriver {
     var pendingUpdate: CheckedContinuation<Void, Never>?
     var dismissed: (@MainActor () -> Void)?
 
+    func restore(id: UUID) -> AgentActivityAttributes.ContentState? { currentID == id ? state : nil }
     func start(id: UUID, state: AgentActivityAttributes.ContentState) throws {
         if failure { throw NSError(domain: "Test", code: 1) }
         maximumConcurrent = max(maximumConcurrent, currentID == nil ? 1 : 2)
@@ -177,10 +220,285 @@ private final class RecordingActivityDriver: LiveActivityDriver {
         removeCalls += 1
     }
     func observeDismissal(_ dismissed: @escaping @MainActor () -> Void) { self.dismissed = dismissed }
+    var availabilityChanged: (@MainActor (Bool) -> Void)?
+    func observeAvailability(_ changed: @escaping @MainActor (Bool) -> Void) { availabilityChanged = changed }
 }
 
 @MainActor
 struct FollowControllerTests {
+    /// A running follow, and what a later run of the app needs to take it over.
+    private func followed() async throws -> (
+        session: HostSession, terminal: Terminal, driver: RecordingActivityDriver, defaults: UserDefaults,
+        task: FollowTask, controller: FollowController, window: UUID, reopen: () -> FollowController
+    ) {
+        let defaults = try #require(UserDefaults(suiteName: "LiveActivityTests.\(UUID())"))
+        let driver = RecordingActivityDriver()
+        let controller = FollowController(defaults: defaults, driver: driver)
+        let session = HostSession(host: .makeDemo())
+        session.start(keys: KeyLibrary())
+        for _ in 0..<200 {
+            if session.state == .connected { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let terminal = try #require(session.terminals.first(where: FollowTask.canFollow))
+        controller.enabled = true
+        let window = UUID()
+        controller.window(window, phase: .active)
+        controller.start(session: session, terminal: terminal)
+        await controller.waitForUpdates()
+        let task = try #require(controller.selection)
+        let reopen = {
+            let next = FollowController(defaults: defaults, driver: driver)
+            next.window(UUID(), phase: .active)
+            return next
+        }
+        return (session, terminal, driver, defaults, task, controller, window, reopen)
+    }
+
+    /// Edits what a previous run left, for what can't be produced by a demo session.
+    private func editStored(_ defaults: UserDefaults, _ edit: (inout [String: Any], inout [String: Any]) -> Void) throws {
+        let data = try #require(defaults.data(forKey: FollowController.followKey))
+        var stored = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var task = try #require(stored["task"] as? [String: Any])
+        edit(&stored, &task)
+        stored["task"] = task
+        defaults.set(try JSONSerialization.data(withJSONObject: stored), forKey: FollowController.followKey)
+    }
+
+    @Test func sameTaskSurvivesReopeningAndItsTerminal() async throws {
+        let f = try await followed()
+        defer { f.session.stop() }
+        #expect(f.driver.starts == 1)
+        let removals = f.driver.removeCalls
+
+        // Backgrounded and back in the same run.
+        f.controller.window(f.window, phase: .background)
+        await f.controller.waitForUpdates()
+        #expect(f.driver.state?.isLastKnown == true)
+        f.controller.window(f.window, phase: .active)
+        f.controller.received(f.session)
+        await f.controller.waitForUpdates()
+        #expect(f.controller.selection == f.task)
+        #expect(f.driver.state?.isLastKnown == false)
+
+        // A new run of the app takes the same activity over: nothing to choose again.
+        let reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == f.task)
+        #expect(reopened.follows(hostID: f.session.host.id, address: f.terminal.address))
+        #expect(reopened.route(for: AgentActivityAttributes(followID: f.task.followID).url) == f.task)
+        #expect(f.driver.starts == 1)
+        #expect(f.driver.removeCalls == removals)
+        #expect(f.driver.currentID == f.task.followID)
+
+        // It keeps updating through the session of that machine, and it still ends as usual.
+        let updates = f.driver.updates
+        reopened.received(f.session)
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == f.task)
+        #expect(f.driver.updates == updates + 1)
+        f.driver.dismissed?()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+    }
+
+    @Test func rejectedLostSessionKeepsTheCurrentFollow() async throws {
+        let f = try await followed()
+        defer { f.controller.stop(); f.session.stop() }
+        let removals = f.driver.removeCalls
+        var lost = f.terminal
+        lost.reason = "lost"
+        f.controller.start(session: f.session, terminal: lost)
+        await f.controller.waitForUpdates()
+        #expect(f.controller.selection == f.task)
+        #expect(f.controller.errorMessage == "This terminal session is no longer available.")
+        #expect(f.driver.currentID == f.task.followID)
+        #expect(f.driver.starts == 1)
+        #expect(f.driver.removeCalls == removals)
+    }
+
+    @Test func aReopenedFollowNeverBroadensToAnotherTask() async throws {
+        // A turn that moved in the gap may be a different task.
+        var f = try await followed()
+        try editStored(f.defaults) { stored, _ in stored["observedTurn"] = 999 }
+        var reopened = f.reopen()
+        #expect(reopened.selection == f.task)
+        reopened.received(f.session)
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.driver.currentID == nil)
+        f.session.stop()
+
+        // So may a terminal at the same address with another start.
+        f = try await followed()
+        try editStored(f.defaults) { _, task in task["createdMs"] = 1 }
+        reopened = f.reopen()
+        reopened.received(f.session)
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.driver.currentID == nil)
+        f.session.stop()
+
+        // Past iOS's limit it can't be the running activity any more.
+        f = try await followed()
+        try editStored(f.defaults) { _, task in task["startedAt"] = Date.now.timeIntervalSinceReferenceDate - 9 * 3600 }
+        reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        f.session.stop()
+
+        // Another machine's session doesn't take it up.
+        f = try await followed()
+        reopened = f.reopen()
+        let other = HostSession(host: .makeDemo())
+        reopened.received(other)
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == f.task)
+        f.session.stop()
+    }
+
+    @Test func nothingComesBackAfterItEnded() async throws {
+        // Dismissed or ended by iOS while the app wasn't running.
+        var f = try await followed()
+        f.driver.currentID = nil
+        var reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.driver.starts == 1)
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        f.session.stop()
+
+        // Stop Following.
+        f = try await followed()
+        f.controller.stop()
+        await f.controller.waitForUpdates()
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        f.session.stop()
+
+        // The opt-out, also when it was left on in storage for the follow.
+        f = try await followed()
+        f.controller.enabled = false
+        await f.controller.waitForUpdates()
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        f.session.stop()
+
+        // The task's end.
+        f = try await followed()
+        f.controller.received(f.session, message: .event(TerminalEvent(
+            seq: 1, terminal: f.terminal.address, change: .lost(reason: "Lost", exitCode: nil))))
+        await f.controller.waitForUpdates()
+        #expect(f.controller.selection == nil)
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        f.session.stop()
+
+        // Live Activities turned off in iOS Settings while the app wasn't running.
+        f = try await followed()
+        f.driver.isAvailable = false
+        reopened = f.reopen()
+        await reopened.waitForUpdates()
+        #expect(reopened.selection == nil)
+        #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
+        f.session.stop()
+    }
+
+    @Test func everyBlockedStartSaysWhyAndKnownStateIsObserved() async throws {
+        let suite = "LiveActivityTests.\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let driver = RecordingActivityDriver()
+        let controller = FollowController(defaults: defaults, driver: driver)
+        let session = HostSession(host: .makeDemo())
+        session.start(keys: KeyLibrary())
+        defer { session.stop() }
+        for _ in 0..<200 {
+            if session.state == .connected { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let terminal = try #require(session.terminals.first(where: FollowTask.canFollow))
+        let window = UUID()
+
+        // No active window is its own reason, not a silent return: first the launch's initial
+        // phase, then the transition that makes the same window able to start.
+        controller.enabled = true
+        controller.window(window, phase: .inactive)
+        controller.start(session: session, terminal: terminal)
+        #expect(controller.errorMessage?.contains("on screen") == true)
+        #expect(driver.starts == 0)
+        controller.dismissError()
+        controller.window(window, phase: .active)
+
+        controller.enabled = false
+        #expect(controller.followBlock(session: session, terminal: terminal)?.contains("Live Activity Settings") == true)
+        controller.start(session: session, terminal: terminal)
+        #expect(controller.errorMessage?.contains("Live Activity Settings") == true)
+        controller.dismissError()
+        controller.enabled = true
+        #expect(controller.followBlock(session: session, terminal: nil) == "This terminal is gone.")
+        #expect(controller.followBlock(session: session, terminal: terminal) == nil)
+
+        // The switch in iOS Settings: from the update stream, and on coming back to Hirte.
+        driver.isAvailable = false
+        driver.availabilityChanged?(false)
+        #expect(!controller.isAvailable)
+        #expect(controller.followBlock(session: session, terminal: terminal)?.contains("iOS Settings") == true)
+        controller.start(session: session, terminal: terminal)
+        #expect(controller.errorMessage?.contains("iOS Settings") == true)
+        #expect(driver.starts == 0)
+        controller.dismissError()
+        driver.isAvailable = true
+        controller.window(window, phase: .active)
+        #expect(controller.isAvailable)
+
+        // A success says so; turning the switch off while following ends the follow.
+        controller.start(session: session, terminal: terminal)
+        await controller.waitForUpdates()
+        #expect(driver.starts == 1)
+        #expect(controller.unconfirmedStart == controller.selection?.followID)
+        controller.startConfirmed()
+        #expect(controller.unconfirmedStart == nil)
+        driver.isAvailable = false
+        driver.availabilityChanged?(false)
+        await controller.waitForUpdates()
+        #expect(controller.selection == nil)
+        #expect(driver.currentID == nil)
+        driver.isAvailable = true
+        driver.availabilityChanged?(true)
+
+        // Left right after the tap, with the start still queued: nothing starts, and it says so.
+        controller.start(session: session, terminal: terminal)
+        controller.window(window, phase: .inactive)
+        await controller.waitForUpdates()
+        #expect(driver.starts == 1)
+        #expect(controller.selection == nil)
+        #expect(controller.errorMessage?.contains("left the screen") == true)
+        controller.dismissError()
+        controller.window(window, phase: .active)
+
+        // Removed by iOS right after the request, while on screen: visible, and not when away.
+        controller.start(session: session, terminal: terminal)
+        await controller.waitForUpdates()
+        driver.dismissed?()
+        await controller.waitForUpdates()
+        #expect(controller.selection == nil)
+        #expect(controller.errorMessage?.contains("right after it started") == true)
+        controller.dismissError()
+        controller.start(session: session, terminal: terminal)
+        await controller.waitForUpdates()
+        controller.window(window, phase: .background)
+        driver.dismissed?()
+        await controller.waitForUpdates()
+        #expect(controller.selection == nil)
+        #expect(controller.errorMessage == nil)
+    }
+
     @Test func lastKnownHandoffDeduplicatesAndEndsItsOwnBackgroundTask() async throws {
         let suite = "LiveActivityTests.\(UUID())"
         let defaults = try #require(UserDefaults(suiteName: suite))
@@ -346,11 +664,6 @@ struct FollowControllerTests {
 
         controller.start(session: session, terminal: terminal)
         await controller.waitForUpdates()
-        controller.terminalOpened(hostID: session.host.id, address: terminal.address)
-        await controller.waitForUpdates()
-        #expect(driver.currentID == nil)
-        controller.start(session: session, terminal: terminal)
-        await controller.waitForUpdates()
         controller.sessionRemoved(session)
         await controller.waitForUpdates()
         #expect(driver.currentID == nil)
@@ -362,7 +675,7 @@ struct FollowControllerTests {
             await controller.waitForUpdates()
             #expect(controller.selection == nil)
             #expect(driver.currentID == nil)
-            controller.terminalOpened(hostID: session.host.id, address: terminal.address)
+            controller.stop()
             await controller.waitForUpdates()
             #expect(driver.state == nil) // Also removes the final ended UI.
         }
@@ -393,6 +706,16 @@ struct FollowControllerTests {
 /// Explicit local simulator/device validation; routine unit runs never request an activity.
 @MainActor
 struct ActivityKitPrototypeTests {
+    /// After Live Activities were refused for this app (`LiveActivityUITests.testLockScreenPermission`).
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["HIRTE_LIVE_SYSTEM_TEST"] == "denied"))
+    func refusedActivityThrowsWhatThePersonIsTold() async throws {
+        let driver = ActivityKitDriver()
+        #expect(!driver.isAvailable)
+        let state = AgentActivityAttributes.ContentState(
+            phase: .working, progress: nil, since: .now, asOf: .now, isLastKnown: false, headline: nil)
+        #expect(throws: ActivityAuthorizationError.denied) { try driver.start(id: UUID(), state: state) }
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["HIRTE_LIVE_SYSTEM_TEST"] == "1"))
     func actualActivityCanStartUpdateAndEnd() async throws {
         let driver = ActivityKitDriver()
@@ -404,6 +727,9 @@ struct ActivityKitPrototypeTests {
         try driver.start(id: id, state: state)
         let activity = try #require(Activity<AgentActivityAttributes>.activities.first)
         #expect(activity.attributes.followID == id)
+        // A later run takes the running activity over, with its content.
+        #expect(ActivityKitDriver().restore(id: id)?.phase == .working)
+        #expect(ActivityKitDriver().restore(id: UUID()) == nil)
         #expect(Activity<AgentActivityAttributes>.activities.count == 1)
         #expect(activity.content.state.headline == nil)
         state.isLastKnown = true
@@ -421,11 +747,14 @@ struct ActivityKitPrototypeTests {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(activity.activityState == .ended || activity.activityState == .dismissed)
+        // An ended activity still on the Lock Screen is not running: it doesn't come back.
+        #expect(ActivityKitDriver().restore(id: id) == nil)
         await driver.removeAll()
         for _ in 0..<100 {
             if activity.activityState == .dismissed { break }
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(activity.activityState == .dismissed)
+        #expect(ActivityKitDriver().restore(id: id) == nil)
     }
 }

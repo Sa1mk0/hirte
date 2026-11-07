@@ -47,7 +47,7 @@
       "build-settings": {
         "APPLICATION_EXTENSION_API_ONLY": "YES",
         "CODE_SIGN_STYLE": "Automatic",
-        "CURRENT_PROJECT_VERSION": "8",
+        "CURRENT_PROJECT_VERSION": "10",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "HirteLiveActivity/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Hirte Activity",

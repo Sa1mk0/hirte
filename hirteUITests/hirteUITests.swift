@@ -262,6 +262,9 @@ final class DemoTourTests: XCTestCase {
         app.launch()
         startDemo(app)
         open(app, "t5")
+        // These checks start as a viewer even if an earlier run remembered Watch Only.
+        let initiallyWatching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Watching'")).firstMatch
+        if initiallyWatching.waitForExistence(timeout: 1) { app.terminalAction("Take Over").tap() }
         sleep(2)
         shot(app, "zoom-0-start")
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
@@ -282,6 +285,9 @@ final class DemoTourTests: XCTestCase {
         app.launch()
         startDemo(app)
         open(app, "t5")
+        // These checks start as a viewer even if an earlier run remembered Watch Only.
+        let initiallyWatching = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Watching'")).firstMatch
+        if initiallyWatching.waitForExistence(timeout: 1) { app.terminalAction("Take Over").tap() }
         let watch = app.buttons["Watch Only"]
         XCTAssertTrue(watch.waitForExistence(timeout: 5))
         watch.tap()

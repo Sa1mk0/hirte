@@ -1,7 +1,7 @@
 import Foundation
 import HerdrKit
 
-struct FollowTask: Equatable {
+struct FollowTask: Equatable, Codable {
     let followID: UUID
     let hostID: UUID
     let address: String
@@ -23,9 +23,23 @@ struct FollowTask: Equatable {
             && (startTurn == nil || terminal.turn.map { $0 >= startTurn! } == true)
     }
 
-    static func canFollow(_ terminal: Terminal) -> Bool {
-        terminal.isLive && terminal.createdMs > 0
-            && (terminal.agentState == .working || terminal.agentState == .needsYou)
+    static func canFollow(_ terminal: Terminal) -> Bool { ineligibility(terminal) == nil }
+
+    /// Why this terminal can't be followed, in words for the person; nil when it can.
+    static func ineligibility(_ terminal: Terminal) -> String? {
+        guard terminal.isLive else { return "This terminal has ended." }
+        // A `lost` event keeps the record live but sets its end reason/code.
+        // Match reduce() here so Follow is never offered only to return silently.
+        guard terminal.reason == nil, terminal.exitCode == nil else {
+            return "This terminal session is no longer available."
+        }
+        // Part of the task's identity: without it a replaced terminal would look like the same one.
+        guard terminal.createdMs > 0 else { return "This terminal has no stable session identity yet. Reconnect to the machine." }
+        switch terminal.agentState {
+        case .working, .needsYou: return nil
+        case nil: return "No agent reports a status in this terminal."
+        case .done, .idle, .error: return "Only a working or waiting agent can be followed."
+        }
     }
 
     /// A changed turn during a connection gap may belong to another task. Without the
