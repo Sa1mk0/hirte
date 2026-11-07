@@ -60,10 +60,8 @@ struct TerminalListView: View {
             }
             .sheet(isPresented: $showingAgentSettings) {
                 NavigationStack {
-                    AgentOverviewSettingsView()
+                    agentSettings
                         .accessibilityIdentifier("agent-overview-settings")
-                        // Keep the dismissal action reachable while scrolling the long form.
-                        .toolbarMinimizationBehavior(.never, for: .navigationBar)
                         .toolbar {
                             Button("Done") { showingAgentSettings = false }
                                 .accessibilityIdentifier("agent-overview-done")
@@ -95,6 +93,18 @@ struct TerminalListView: View {
                 Text("First connection to \(key.host). Its host key fingerprint is\n\n\(key.fingerprint)\n\n"
                     + "Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_*_key.pub` on the machine.")
             }
+    }
+
+    /// iOS 27 can minimize the navigation bar while the form scrolls. Keep Done reachable there;
+    /// earlier releases use the standard navigation bar without that minimization behavior.
+    @ViewBuilder
+    private var agentSettings: some View {
+        if #available(iOS 27.0, *) {
+            AgentOverviewSettingsView()
+                .toolbarMinimizationBehavior(.never, for: .navigationBar)
+        } else {
+            AgentOverviewSettingsView()
+        }
     }
 
     @ViewBuilder

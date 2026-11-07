@@ -46,6 +46,7 @@ struct RootView: View {
         NavigationSplitView(columnVisibility: $columns) {
             SidebarView(sessions: sessions, selectedHost: selectedHost, selectedTerminal: $selectedTerminal,
                         besideDetail: sizeClass == .regular)
+                .modifier(PadSidebarWidth())
                 // The detail column runs under the sidebar: its default material would take on the
                 // colors of what's selected.
                 .containerBackground(Color.sidebarBackground, for: .navigation)
@@ -108,6 +109,18 @@ struct RootView: View {
             case .active: sessions.resumePaused(keys: keys)
             default: break
             }
+        }
+    }
+}
+
+/// An iPad has room for the rows' titles in the list column; elsewhere (the unfolded Duo) the
+/// column keeps the system's width.
+private struct PadSidebarWidth: ViewModifier {
+    func body(content: Content) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            content.navigationSplitViewColumnWidth(min: 320, ideal: 400, max: 480)
+        } else {
+            content
         }
     }
 }
