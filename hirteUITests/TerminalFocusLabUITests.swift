@@ -46,6 +46,7 @@ final class TerminalFocusLabUITests: XCTestCase {
     /// animation quiescence after text entry can otherwise delay every later action.
     @MainActor
     func testKeyboardAndTakeOverActionsWhileWatching() throws {
+        XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
                                "-appearance", "light", "-hirte.demo", "YES", "-terminal.watch", "NO"]
@@ -60,7 +61,9 @@ final class TerminalFocusLabUITests: XCTestCase {
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         app.terminalAction("Watch Only").tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
-        app.terminalAction("Show Keyboard").tap()
+        let showKeyboard = app.terminalAction("Show Keyboard")
+        showKeyboard.tap()
+        XCTAssertTrue(showKeyboard.waitForNonExistence(timeout: 5), "The menu action must actually apply")
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         XCTAssertTrue(app.terminalAction("Watch Only").exists)
 
