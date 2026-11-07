@@ -120,6 +120,9 @@ final class TerminalCanvasView: UIView, UITextInput {
     let scrollView = UIScrollView()
     private(set) var scrollFraction: CGFloat = 0
     private var applyingScroll = false
+    // History indices can rebase while output prunes. UIKit's in-flight coordinate and
+    // velocity stay untouched; this origin maps them to the current terminal history.
+    private var historyOrigin: CGFloat = 0
     private var configuredRoute = TerminalScreenModel.ScrollRoute.disabled
     private var configuredGeneration = -1
     private var configuredCellHeight: CGFloat = 0
@@ -407,6 +410,8 @@ final class TerminalCanvasView: UIView, UITextInput {
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         #if DEBUG
+        TerminalScrollTrace.shared?.record("draw-start", state: scrollView.isDecelerating ? 4 : 0,
+            offset: CGFloat(screen.scrollbar?.offset ?? 0) * geometry().cellHeight + scrollFraction)
         defer {
             didDrawForTesting?()
             TerminalScrollTrace.shared?.content("draw-content", frame: screen)
@@ -990,6 +995,9 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// Also called when SwiftUI removes this view. Stops native motion before changing its
     /// model, grid, font, route or channel; programmatic synchronization must never emit input.
     func cancelScrolling(resetFraction: Bool = true) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("cancel", state: scrollView.isDecelerating ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
         motionGeneration = nil
         model?.setScrollActive(false)
         wasDecelerating = false
@@ -1001,6 +1009,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             scrollFraction = 0
             setNeedsDisplay()
         }
+        if historyOrigin != 0 { synchronizeScrolling() }
     }
 
     /// A touch that arrests inertia is consumed, before it can click or take over.
@@ -1011,6 +1020,8 @@ final class TerminalCanvasView: UIView, UITextInput {
 
     private func synchronizeScrolling() {
         guard !applyingScroll else { return }
+        applyingScroll = true
+        defer { applyingScroll = false }
         let route = cropped ? .disabled : model?.scrollRoute ?? .disabled
         let generation = model?.scrollGeneration ?? -1
         let height = geometry().cellHeight
@@ -1022,8 +1033,10 @@ final class TerminalCanvasView: UIView, UITextInput {
         configuredGeneration = generation
         configuredCellHeight = height
         configuredSize = size
-        applyingScroll = true
-        defer { applyingScroll = false }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-start", state: scrollView.isDecelerating ? 4 : 0,
+            touch: changed ? 1 : 0, offset: scrollView.contentOffset.y, height: CGFloat(screen.scrollbar?.offset ?? 0))
+        #endif
         scrollView.frame = CGRect(origin: .zero, size: size)
         scrollView.isScrollEnabled = route != .disabled && !pinching
         var offset: CGFloat = 0
@@ -1034,19 +1047,51 @@ final class TerminalCanvasView: UIView, UITextInput {
                 extent = CGFloat(max(0, bar.total - bar.visible)) * height
                 if screen.lineBelow == nil { scrollFraction = 0 }
                 offset = min(extent, CGFloat(bar.offset) * height + scrollFraction)
-                // Observation can echo the frame we just published. Do not round/reassign
-                // UIKit's subpixel offset mid-drag or deceleration; round only for drawing.
-                if !changed, Int(floor(scrollView.contentOffset.y / height)) == bar.offset {
-                    offset = scrollView.contentOffset.y
+                if !changed, motionGeneration != nil {
+                    let native = scrollView.contentOffset.y
+                    let row = Int(floor((native + historyOrigin) / height))
+                    historyOrigin += CGFloat(bar.offset - row) * height
+                    offset = native
+                    extent -= historyOrigin
+                } else {
+                    let position = scrollView.contentOffset.y + historyOrigin
+                    historyOrigin = 0
+                    // Canonicalize the raw coordinate, never the rounded draw fraction:
+                    // a fraction rounded up to one row must not advance the next gesture.
+                    if !changed, Int(floor(position / height)) == bar.offset {
+                        offset = position
+                    }
                 }
             }
         case .remote:
+            historyOrigin = 0
             extent = Self.remoteScrollOrigin * 2
             offset = changed ? Self.remoteScrollOrigin : scrollView.contentOffset.y
-        case .disabled: break
+        case .disabled: historyOrigin = 0
         }
-        scrollView.contentSize = CGSize(width: size.width, height: size.height + extent)
-        if scrollView.contentOffset.y != offset { scrollView.contentOffset = CGPoint(x: 0, y: offset) }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("history-origin", state: scrollView.isDecelerating ? 4 : 0,
+            offset: historyOrigin, height: extent)
+        #endif
+        // Adjust both real bounds in the native coordinate system. On pruning the
+        // extent stays continuous instead of contentSize clamping an in-flight offset.
+        if scrollView.contentInset.top != historyOrigin { scrollView.contentInset.top = historyOrigin }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-size", state: scrollView.isDecelerating ? 4 : 0,
+            touch: scrollView.contentSize.height, offset: scrollView.contentOffset.y, height: size.height + extent)
+        #endif
+        let contentSize = CGSize(width: size.width, height: size.height + extent)
+        if scrollView.contentSize != contentSize { scrollView.contentSize = contentSize }
+        if scrollView.contentOffset.y != offset {
+            #if DEBUG
+            TerminalScrollTrace.shared?.record("sync-offset", state: scrollView.isDecelerating ? 4 : 0,
+                touch: scrollView.contentOffset.y, offset: offset)
+            #endif
+            scrollView.contentOffset = CGPoint(x: 0, y: offset)
+        }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("sync-end", state: scrollView.isDecelerating ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
         if route == .remote { remoteRow = Int(floor(offset / height)) }
     }
 
@@ -1482,6 +1527,10 @@ extension TerminalCanvasView: UIScrollViewDelegate {
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record(applyingScroll ? "native-suppressed" : "native", state: scrollView.isDecelerating ? 4 : 2,
+                                           offset: scrollView.contentOffset.y)
+        #endif
         guard !applyingScroll else { return }
         guard let model, motionGeneration == model.scrollGeneration,
               model.scrollRoute == configuredRoute, !pinching else {
@@ -1491,6 +1540,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         }
         let height = geometry().cellHeight
         var offset = scrollView.contentOffset.y
+        if configuredRoute == .history { offset += historyOrigin }
         if configuredRoute == .history, let bar = screen.scrollbar {
             offset = min(max(offset, 0), CGFloat(max(0, bar.total - bar.visible)) * height)
         }
@@ -1501,11 +1551,15 @@ extension TerminalCanvasView: UIScrollViewDelegate {
                                            offset: offset, height: height)
         #endif
         applyingScroll = true
+        let previousOrigin = historyOrigin
         switch configuredRoute {
         case .history:
-            let frame = model.scrollHistory(to: row)
+            let frame = model.scrollHistory(by: row - (screen.scrollbar?.offset ?? row))
             let fraction = ((offset - CGFloat(row) * height) * contentScaleFactor).rounded() / contentScaleFactor
             scrollFraction = frame.lineBelow == nil ? 0 : max(0, fraction)
+            // Output can rebase the VT between its write and the scheduled snapshot.
+            // Keep that origin shift out of UIKit's native motion, including subpixels.
+            historyOrigin += CGFloat((frame.scrollbar?.offset ?? row) - row) * height
             screen = frame
             setNeedsDisplay()
         case .remote:
@@ -1515,6 +1569,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         case .disabled: break
         }
         applyingScroll = false
+        if historyOrigin != previousOrigin { synchronizeScrolling() }
         #if DEBUG
         TerminalScrollTrace.shared?.record("offset", state: scrollView.isDecelerating ? 4 : 2,
                                            touch: scrollView.panGestureRecognizer.location(in: window).y,
@@ -1523,17 +1578,25 @@ extension TerminalCanvasView: UIScrollViewDelegate {
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("release", state: decelerate ? 4 : 0, offset: scrollView.contentOffset.y)
+        #endif
         wasDecelerating = decelerate
         if !decelerate {
             motionGeneration = nil
             model?.setScrollActive(false)
+            synchronizeScrolling()
         }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("stop", offset: scrollView.contentOffset.y)
+        #endif
         wasDecelerating = false
         motionGeneration = nil
         model?.setScrollActive(false)
+        synchronizeScrolling()
     }
 }
 

@@ -5,6 +5,59 @@ final class TerminalScrollUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
     @MainActor
+    func testCoasting() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        let env = ProcessInfo.processInfo.environment
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+                               "-appearance", env["HIRTE_UI_APPEARANCE"] ?? "light",
+                               "-hirte.demo", "YES", "-hirte.demo.dense", "YES",
+                               "-terminal.watch", "NO", "-terminal.fontSize", "13"]
+        app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
+        for key in ["HIRTE_COAST_REFERENCE", "HIRTE_SCROLL_TUI_MS", "HIRTE_COAST_OUTPUT"] {
+            if let value = env[key], !value.isEmpty { app.launchEnvironment[key] = value }
+        }
+        app.launch()
+        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        first.tap()
+        let screen = app.descendants(matching: .any).matching(identifier:
+            env["HIRTE_COAST_REFERENCE"] == "1" ? "coast-reference" : "terminal-screen").firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        func drag(_ element: XCUIElement, distance: CGFloat, velocity: CGFloat, hold: TimeInterval) {
+            print("COAST_GESTURE time=\(ProcessInfo.processInfo.systemUptime) velocity=\(velocity) distance=\(distance) hold=\(hold)")
+            let start = element.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: distance > 0 ? 0.3 : 0.7))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: distance)),
+                        withVelocity: XCUIGestureVelocity(rawValue: velocity), thenHoldForDuration: hold)
+        }
+        if env["HIRTE_COAST_OUTPUT"] == "1" {
+            // Start near the live end with enough retained history on both sides of a
+            // page prune. The stream continues through the actual native deceleration.
+            Thread.sleep(forTimeInterval: 1.5)
+            drag(screen, distance: 180, velocity: 600, hold: 0)
+            let live = app.buttons["Scrolled back. Tap to return to the live screen."]
+            XCTAssertTrue(live.waitForExistence(timeout: 3))
+            live.tap()
+            Thread.sleep(forTimeInterval: 1.5)
+            drag(screen, distance: 180, velocity: 1200, hold: 0)
+        } else {
+            let sidebar = app.collectionViews.firstMatch
+            XCTAssertTrue(sidebar.waitForExistence(timeout: 5))
+            drag(sidebar, distance: -180, velocity: 600, hold: 0)
+            for velocity: CGFloat in [240, 600, 1200] {
+                drag(screen, distance: 180, velocity: velocity, hold: 0)
+            }
+            drag(screen, distance: -240, velocity: 160, hold: 0.4)
+        }
+        // Let the opt-in bounded trace flush only after all native motion ended.
+        Thread.sleep(forTimeInterval: 2)
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = "coasting-final"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
     func testContinuousDragAndRelease() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()

@@ -144,8 +144,16 @@ enum DemoDenseScript {
         }
         #if DEBUG
         if ProcessInfo.processInfo.environment["HIRTE_SCROLL_TRACE"] == "1" {
-            let history = (0..<1000).map { "sample \($0) ready 漢 e\u{301}\r\n" }.joined()
-            roles["t1"] = .shell(history: history, cwd: website)
+            let output = ProcessInfo.processInfo.environment["HIRTE_COAST_OUTPUT"] == "1"
+            let history = (0..<(output ? 14000 : 1000)).map { "sample \($0) ready 漢 e\u{301}\r\n" }.joined()
+            if output {
+                roles["t1"] = .stream(paint: history,
+                    lines: (0..<2000).map { batch in
+                        (0..<8).map { "sample \(14000 + batch * 8 + $0) ready 漢 e\u{301}\r\n" }.joined()
+                    }, interval: .milliseconds(50))
+            } else {
+                roles["t1"] = .shell(history: history, cwd: website)
+            }
         }
         #endif
         return roles

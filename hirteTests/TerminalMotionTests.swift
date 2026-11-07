@@ -139,12 +139,12 @@ final class TerminalMotionTests: XCTestCase {
         for (distance, expected) in [(3, "https://example.com"), (2, "https://example.org")] {
             vt.scroll(by: nil)
             let target = vt.scrollbar!.offset - distance
-            let frame = model.scrollHistory(to: target)
+            let frame = model.scrollHistory(by: target - vt.scrollbar!.offset)
             XCTAssertEqual(vt.link(at: (3, frame.rows), in: frame)?.absoluteString, expected)
             vt.selectWord(at: (3, frame.rows))
             XCTAssertTrue(vt.selectedText()?.contains(distance == 3 ? "https" : "linked") == true)
-            _ = model.scrollHistory(to: target - 1)
-            let selected = model.scrollHistory(to: target)
+            _ = model.scrollHistory(by: target - 1 - vt.scrollbar!.offset)
+            let selected = model.scrollHistory(by: target - vt.scrollbar!.offset)
             XCTAssertNotNil(selected.selectionBelow)
             canvas.screen = selected
             canvas.scrollViewWillBeginDragging(canvas.scrollView)
@@ -232,13 +232,98 @@ final class TerminalMotionTests: XCTestCase {
         let (vt, model, canvas) = try fixture()
         defer { model.stop() }
         let target = vt.scrollbar!.offset - 1
-        canvas.screen = model.scrollHistory(to: target)
+        canvas.screen = model.scrollHistory(by: target - vt.scrollbar!.offset)
         XCTAssertEqual(canvas.screen.cursor?.y, 20)
         canvas.scrollViewWillBeginDragging(canvas.scrollView)
         move(canvas, to: CGFloat(target) * 18 + 9)
         XCTAssertEqual(canvas.screen.cursor?.y, 20)
         XCTAssertEqual(canvas.scrollFraction, 9)
         XCTAssertNil(canvas.screen.cursorRow, "An off-viewport cursor must not shift historical geometry")
+    }
+
+    func testPendingPruneKeepsNativeCoastingCoordinateAndAppliesOnlyGestureDelta() throws {
+        let vt = try VirtualTerminal(cols: 40, rows: 20, scrollbackLines: 3000)
+        for row in 0..<4000 { vt.write(Data("sample \(row) ready\r\n".utf8)) }
+        let model = TerminalScreenModel(theme: TerminalTheme.find(TerminalTheme.defaultDark, dark: true), terminal: vt)
+        defer { model.stop() }
+        let canvas = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 500, height: 380))
+        canvas.contentScaleFactor = 2
+        canvas.model = model
+        canvas.screen = model.frame
+        canvas.layoutIfNeeded()
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        move(canvas, to: canvas.scrollView.contentOffset.y - 4 * 18 - 7.5)
+        canvas.scrollViewDidEndDragging(canvas.scrollView, willDecelerate: true)
+        let published = model.frame.scrollbar!.offset
+        // Output can prune the VT before its scheduled snapshot reaches Observation.
+        for batch in 0..<200 {
+            model.receiveOutputForTesting(Data((0..<8).map { "sample \(4000 + batch * 8 + $0)\r\n" }.joined().utf8))
+            if vt.scrollbar!.offset < published { break }
+        }
+        let anchor = vt.scrollbar!.offset
+        XCTAssertLessThan(anchor, published, "Exercise a real pending prune")
+        let native = canvas.scrollView.contentOffset.y - 18
+        move(canvas, to: native)
+        XCTAssertEqual(model.frame.scrollbar!.offset, anchor - 1,
+                       "The one-row native step applies to the retained anchor, not the stale absolute index")
+        canvas.screen = model.frame
+        XCTAssertEqual(canvas.scrollView.contentOffset.y, native, accuracy: 0.001,
+                       "Neither a contentSize clamp nor an explicit offset sync may rewrite native motion")
+        move(canvas, to: native - 3)
+        XCTAssertEqual(canvas.scrollView.contentOffset.y, native - 3, accuracy: 0.001)
+        let raw = canvas.scrollView.contentOffset.y
+        let remainder = raw - floor(raw / 18) * 18
+        let canonical = CGFloat(canvas.screen.scrollbar!.offset) * 18 + remainder
+        canvas.scrollViewDidEndDecelerating(canvas.scrollView)
+        XCTAssertEqual(canvas.scrollView.contentOffset.y, canonical, accuracy: 0.001,
+                       "Restore canonical coordinates with UIKit's raw remainder after motion ends")
+    }
+
+    func testRebasedRawFractionSurvivesEndOrStopTouchAndNextGesture() throws {
+        for scale: CGFloat in [2, 3] {
+            for stopTouch in [false, true] {
+                for fraction: CGFloat in [17.5, 17.833333333] {
+                    let vt = try VirtualTerminal(cols: 40, rows: 20, scrollbackLines: 3000)
+                    for row in 0..<4000 { vt.write(Data("sample \(row) ready\r\n".utf8)) }
+                    let model = TerminalScreenModel(theme: TerminalTheme.find(TerminalTheme.defaultDark, dark: true), terminal: vt)
+                    defer { model.stop() }
+                    let canvas = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 500, height: 380))
+                    canvas.contentScaleFactor = scale
+                    canvas.scrollView.contentScaleFactor = 3
+                    canvas.model = model
+                    canvas.screen = model.frame
+                    canvas.layoutIfNeeded()
+                    canvas.scrollViewWillBeginDragging(canvas.scrollView)
+                    move(canvas, to: CGFloat(vt.scrollbar!.offset - 10) * 18 + fraction)
+                    canvas.scrollViewDidEndDragging(canvas.scrollView, willDecelerate: true)
+                    let published = model.frame.scrollbar!.offset
+                    let native = canvas.scrollView.contentOffset.y
+                    let remainder = native - floor(native / 18) * 18
+                    for batch in 0..<200 {
+                        model.receiveOutputForTesting(Data((0..<8).map { "sample \(4000 + batch * 8 + $0)\r\n" }.joined().utf8))
+                        if vt.scrollbar!.offset < published { break }
+                    }
+                    XCTAssertLessThan(vt.scrollbar!.offset, published)
+                    move(canvas, to: native - 18)
+                    canvas.screen = model.frame
+                    XCTAssertNotEqual(canvas.scrollView.contentInset.top, 0, "Exercise a rebased native coordinate")
+                    let row = canvas.screen.scrollbar!.offset
+                    let text = canvas.screen.text
+                    let expected = CGFloat(row) * 18 + remainder
+                    if stopTouch { canvas.prepareForTouch() }
+                    else { canvas.scrollViewDidEndDecelerating(canvas.scrollView) }
+                    XCTAssertEqual(canvas.scrollView.contentInset.top, 0)
+                    XCTAssertEqual(canvas.scrollView.contentOffset.y, expected, accuracy: 0.001,
+                                   "Canonicalization preserves UIKit's accepted raw fraction, not the draw fraction")
+                    XCTAssertEqual(Int(floor(canvas.scrollView.contentOffset.y / 18)), row)
+                    XCTAssertEqual(canvas.screen.text, text)
+                    canvas.scrollViewWillBeginDragging(canvas.scrollView)
+                    move(canvas, to: canvas.scrollView.contentOffset.y - 18)
+                    XCTAssertEqual(canvas.screen.scrollbar!.offset, row - 1, "No extra row at the next gesture")
+                    print("COAST_RAW_FRACTION scale=\(scale) requested=\(fraction) accepted=\(remainder) stopTouch=\(stopTouch)")
+                }
+            }
+        }
     }
 
     func testLiveOutputAndPruningRebaseHistoryWithoutFeedingBackMotion() async throws {
@@ -259,6 +344,7 @@ final class TerminalMotionTests: XCTestCase {
         print("PRUNE_START total=\(canvas.screen.scrollbar!.total) offset=\(canvas.screen.scrollbar!.offset) top=\(anchor.split(separator: "\n").first ?? "")")
         let fraction = canvas.scrollFraction
         var offset = canvas.screen.scrollbar!.offset
+        let nativeAnchor = canvas.scrollView.contentOffset.y
         var pruned = false
         for batch in 0..<200 {
             let frames = model.renderedFrames
@@ -274,8 +360,8 @@ final class TerminalMotionTests: XCTestCase {
             }
             XCTAssertEqual(canvas.screen.text, anchor, "Appending must retain the historical anchor")
             XCTAssertEqual(canvas.scrollFraction, fraction)
-            XCTAssertEqual(canvas.scrollView.contentOffset.y, CGFloat(canvas.screen.scrollbar!.offset) * 18 + fraction,
-                           accuracy: 1 / canvas.traitCollection.displayScale)
+            XCTAssertEqual(canvas.scrollView.contentOffset.y, nativeAnchor, accuracy: 0.001,
+                           "Output must not rewrite the coordinate driving native motion")
             let next = canvas.screen.scrollbar!.offset
             if next < offset {
                 print("PRUNE_REBASE total=\(canvas.screen.scrollbar!.total) old_offset=\(offset) new_offset=\(next) fraction=\(fraction) anchor_preserved=\(canvas.screen.text == anchor)")
@@ -309,11 +395,11 @@ final class TerminalMotionTests: XCTestCase {
         let (vt, model, canvas) = try fixture()
         defer { model.stop() }
         let target = vt.scrollbar!.offset - 30
-        _ = model.scrollHistory(to: target)
+        _ = model.scrollHistory(by: target - vt.scrollbar!.offset)
         vt.select(from: (0, 19), to: (10, 20))
         // Refresh after selection through the real local snapshot path.
-        _ = model.scrollHistory(to: target - 1)
-        canvas.screen = model.scrollHistory(to: target)
+        _ = model.scrollHistory(by: target - 1 - vt.scrollbar!.offset)
+        canvas.screen = model.scrollHistory(by: target - vt.scrollbar!.offset)
         var extended = canvas.screen
         extended.lines.append(try XCTUnwrap(extended.lineBelow))
         extended.selection.append(extended.selectionBelow)

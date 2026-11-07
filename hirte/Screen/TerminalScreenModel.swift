@@ -337,11 +337,15 @@ final class TerminalScreenModel {
 
     /// Local gestures publish a matching viewport in the same UIKit callback. Network output
     /// still uses the existing coalescing/DEC2026 path; remote content is never interpolated.
-    func scrollHistory(to offset: Int) -> ScreenFrame {
+    func scrollHistory(by lines: Int) -> ScreenFrame {
         guard scrollRoute == .history, let vt, let bar = vt.scrollbar else { return frame }
-        let target = min(max(offset, 0), max(bar.total - bar.visible, 0))
+        // Output may prune the VT before its scheduled snapshot. Apply native movement
+        // to the retained anchor, never to the old frame's absolute history index.
+        let target = min(max(bar.offset + lines, 0), max(bar.total - bar.visible, 0))
         if target != bar.offset {
             vt.scroll(by: target - bar.offset)
+            renderNow()
+        } else if bar != frame.scrollbar {
             renderNow()
         }
         scrolledBack = !(frame.scrollbar?.atBottom ?? true)
@@ -439,6 +443,9 @@ final class TerminalScreenModel {
         holdTimeout?.cancel()
         holdTimeout = nil
         guard let vt else { return }
+        #if DEBUG
+        TerminalScrollTrace.shared?.record("snapshot-start", offset: CGFloat(vt.scrollbar?.offset ?? 0))
+        #endif
         frame = vt.frame()
         scrolledBack = !(frame.scrollbar?.atBottom ?? true)
         #if DEBUG
