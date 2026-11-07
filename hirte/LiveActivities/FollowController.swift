@@ -158,10 +158,10 @@ final class FollowController {
             errorMessage = "Hirte has to be on screen to start following. Open it and try again."
             return
         }
-        stop()
         let task = FollowTask(hostID: session.host.id, terminal: terminal, now: .now)
         guard case .update(let state) = task.reduce(
             hostID: session.host.id, terminal: terminal, showTitle: showTitle, now: .now) else { return }
+        stop()
         selection = task
         source = session
         observedTurn = terminal.turn

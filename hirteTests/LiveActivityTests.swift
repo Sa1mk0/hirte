@@ -303,6 +303,21 @@ struct FollowControllerTests {
         #expect(f.defaults.data(forKey: FollowController.followKey) == nil)
     }
 
+    @Test func rejectedLostSessionKeepsTheCurrentFollow() async throws {
+        let f = try await followed()
+        defer { f.controller.stop(); f.session.stop() }
+        let removals = f.driver.removeCalls
+        var lost = f.terminal
+        lost.reason = "lost"
+        f.controller.start(session: f.session, terminal: lost)
+        await f.controller.waitForUpdates()
+        #expect(f.controller.selection == f.task)
+        #expect(f.controller.errorMessage == "This terminal session is no longer available.")
+        #expect(f.driver.currentID == f.task.followID)
+        #expect(f.driver.starts == 1)
+        #expect(f.driver.removeCalls == removals)
+    }
+
     @Test func aReopenedFollowNeverBroadensToAnotherTask() async throws {
         // A turn that moved in the gap may be a different task.
         var f = try await followed()
