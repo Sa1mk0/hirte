@@ -4,7 +4,7 @@ import Testing
 @testable import KeyStore
 
 @Test func generateListRenameDelete() throws {
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     let info = try store.generateKey(label: "phone")
     #expect(try store.keys().map(\.id) == [info.id])
 
@@ -22,14 +22,15 @@ import Testing
 /// Keys saved before other key types existed only stored the P-256 point.
 @Test func readsOldRecords() throws {
     let key = P256.Signing.PrivateKey()
+    let id = UUID()
     let old = """
-        {"info":{"id":"\(UUID().uuidString)","label":"old","kind":"software","requiresBiometry":false,
+        {"info":{"id":"\(id.uuidString)","label":"old","kind":"software","requiresBiometry":false,
         "createdAt":0,"publicKeyX963":"\(key.publicKey.x963Representation.base64EncodedString())"},
         "keyData":"\(key.rawRepresentation.base64EncodedString())"}
         """
     let storage = InMemoryKeyStorage()
-    try storage.save(Data(old.utf8), account: "old")
-    let store = KeyStore(storage: storage)
+    try storage.save(Data(old.utf8), account: id.uuidString)
+    let store = KeyStore(storage: storage, privateKeys: InMemoryKeyStorage())
     let info = try #require(try store.keys().first)
     #expect(info.publicKeyBlob == OpenSSH.publicKeyBlob(key.publicKey))
     #expect(!info.isImported)
@@ -42,7 +43,7 @@ import Testing
 }
 
 @Test func ed25519KeySigns() throws {
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     let info = try store.generateEd25519Key(label: "ed")
     #expect(info.algorithm == .ed25519)
     #expect(info.authorizedKeysLine.hasPrefix("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI"))
@@ -56,7 +57,7 @@ import Testing
 
 @Test(.enabled(if: KeyStore.isSecureEnclaveAvailable))
 func secureEnclaveKeySigns() throws {
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     let info = try store.generateKey(label: "se", allowSoftwareFallback: false)
     #expect(info.kind == .secureEnclave)
     guard case .secureEnclave(let key) = try store.signingKey(for: info.id) else {
@@ -141,7 +142,7 @@ struct CBORWriter {
         attestationObject: fake.attestationObject, credentialID: fake.credentialID, relyingParty: "hirte.dev")
     #expect(registration.credentialID == fake.credentialID)
 
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     let info = try store.addSecurityKey(registration, label: "yubikey")
     #expect(info.algorithm == .securityKeyP256)
     #expect(info.authorizedKeysLine.hasPrefix("sk-ecdsa-sha2-nistp256@openssh.com AAAA"))
@@ -206,7 +207,7 @@ private func temporaryDirectory() throws -> URL {
 
 /// Our authorized_keys line and fingerprint must match what ssh-keygen says about it.
 @Test func matchesSSHKeygen() throws {
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     for info in [try store.generateKey(label: "my phone"), try store.generateEd25519Key(label: "my phone")] {
         let file = try temporaryDirectory().appendingPathComponent("key.pub")
         try info.authorizedKeysLine.write(to: file, atomically: true, encoding: .utf8)
@@ -264,7 +265,7 @@ func importsSSHKeygenKeys(_ c: ImportCase) throws {
     #expect(parsed.fingerprint == OpenSSH.sha256Fingerprint(publicKeyLine: publicLine))
     if c.format == nil { #expect(parsed.comment == "laptop") }
 
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     let info = try store.importKey(parsed, label: "laptop")
     #expect(info.isImported)
     #expect(info.authorizedKeysLine == publicLine.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -291,3 +292,48 @@ func importsSSHKeygenKeys(_ c: ImportCase) throws {
     print("bcrypt_pbkdf, 16 rounds: \(elapsed)s")
 }
 #endif
+
+/// A software key's private key is kept apart from its record, behind Face ID if it needs it.
+@Test func privateKeysAreKeptApart() throws {
+    let storage = InMemoryKeyStorage()
+    let privateKeys = InMemoryKeyStorage()
+    let store = KeyStore(storage: storage, privateKeys: privateKeys)
+    let plain = try store.generateEd25519Key(label: "plain")
+    let guarded = try store.generateEd25519Key(label: "guarded", requireBiometry: true)
+
+    #expect(Set(try privateKeys.accounts()) == [plain.id.uuidString, guarded.id.uuidString])
+    #expect(privateKeys.biometryAccounts == [guarded.id.uuidString])
+    for record in try storage.loadAll() {
+        #expect(try JSONDecoder().decode(StoredKey.self, from: record).keyData == nil)
+    }
+    guard case .ed25519 = try store.signingKey(for: guarded.id) else {
+        Issue.record("expected an Ed25519 key")
+        return
+    }
+
+    try store.deleteKey(id: guarded.id)
+    #expect(try privateKeys.accounts() == [plain.id.uuidString])
+}
+
+/// Keys saved with their private key in the record get it moved out, keeping Face ID.
+@Test func movesPrivateKeysOutOfOldRecords() throws {
+    let key = Curve25519.Signing.PrivateKey()
+    let info = SSHKeyInfo(
+        label: "old", kind: .software, requiresBiometry: true, publicKeyBlob: OpenSSH.ed25519Blob(key.publicKey))
+    let storage = InMemoryKeyStorage()
+    try storage.save(
+        try JSONEncoder().encode(StoredKey(info: info, keyData: key.rawRepresentation)), account: info.id.uuidString)
+    let privateKeys = InMemoryKeyStorage()
+    let store = KeyStore(storage: storage, privateKeys: privateKeys)
+
+    #expect(try store.keys().map(\.id) == [info.id])
+    #expect(try privateKeys.load(account: info.id.uuidString) == key.rawRepresentation)
+    #expect(privateKeys.biometryAccounts == [info.id.uuidString])
+    let record = try #require(try storage.load(account: info.id.uuidString))
+    #expect(try JSONDecoder().decode(StoredKey.self, from: record).keyData == nil)
+    guard case .ed25519(let loaded) = try store.signingKey(for: info.id) else {
+        Issue.record("expected an Ed25519 key")
+        return
+    }
+    #expect(loaded.publicKey.rawRepresentation == key.publicKey.rawRepresentation)
+}

@@ -178,7 +178,7 @@ struct NewKeyView: View {
                     .foregroundStyle(.orange)
             }
         case .ed25519:
-            Text("The private key is stored in this device's Keychain and isn't synced. Hirte asks for Face ID before using it if you turn this on.")
+            Text("The private key is stored in this device's Keychain, readable only while it's unlocked, and isn't synced. With Face ID on, the Keychain only hands it out after Face ID.")
         case .securityKey:
             EmptyView()
         }
@@ -287,8 +287,8 @@ struct ImportKeyView: View {
                     TextField("Name", text: $label)
                     Toggle("Require Face ID", isOn: $requireBiometry)
                 } footer: {
-                    Text("The key is stored in this device's Keychain and isn't synced. "
-                        + "Hirte asks for Face ID before using it if you turn this on.")
+                    Text("The key is stored in this device's Keychain, readable only while it's unlocked, "
+                        + "and isn't synced. With Face ID on, the Keychain only hands it out after Face ID.")
                 }
 
                 if let error {

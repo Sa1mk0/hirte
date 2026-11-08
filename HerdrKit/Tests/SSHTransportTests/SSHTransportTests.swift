@@ -127,7 +127,7 @@ private func makeKeys() throws -> [(String, SigningKey)] {
     try keygen.run()
     keygen.waitUntilExit()
     let rsa = try PrivateKeyParser.parse(try String(contentsOf: rsaFile, encoding: .utf8))
-    let store = KeyStore(storage: InMemoryKeyStorage())
+    let store = KeyStore(storage: InMemoryKeyStorage(), privateKeys: InMemoryKeyStorage())
     keys.append(("rsa", try store.signingKey(for: try store.importKey(rsa, label: "rsa").id)))
 
     // A software stand-in for a security key, answering the way WebAuthn does.
