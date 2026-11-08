@@ -22,13 +22,13 @@ struct MachinesView: View {
                     Label("No machines", systemImage: "server.rack")
                 } description: {
                     Text(keys.keys.isEmpty
-                        ? "Create an SSH key first, add it to your machine, then add the machine here."
+                        ? "Add a machine that runs herdr-core and log in with a password, or create or import an SSH key for it first."
                         : "Add a machine that runs herdr-core.")
                 } actions: {
+                    Button("Add Machine") { editing = newHost() }
                     if keys.keys.isEmpty {
-                        Button("Create Key") { showingKeys = true }
-                    } else {
-                        Button("Add Machine") { editing = newHost() }
+                        Button("Add SSH Key") { showingKeys = true }
+                            .buttonStyle(.borderless)
                     }
                     Button("Try the Demo") { addDemo() }
                         .buttonStyle(.borderless)
@@ -112,9 +112,9 @@ struct MachinesView: View {
 }
 
 extension Host {
-    /// An empty machine for the editor, with the newest key preselected.
+    /// An empty machine for the editor, with the newest key preselected, or a password without one.
     static func new(key: UUID?) -> Host {
-        Host(name: "", target: SSHTarget(host: "", username: ""), keyID: key)
+        Host(name: "", target: SSHTarget(host: "", username: ""), keyID: key, passwordLogin: key == nil ? true : nil)
     }
 }
 
@@ -195,6 +195,28 @@ struct HostEditor: View {
     @State var host: Host
     @State private var port = ""
     @State private var session = ""
+    /// One typed here; a saved password is never shown or read into this.
+    @State private var password = ""
+    @State private var hasSavedPassword = false
+    /// Where the saved password was typed for: it isn't sent anywhere else.
+    @State private var savedTarget: SSHTarget?
+    @State private var saveError: String?
+
+    /// The target as it will be saved.
+    private var editedTarget: SSHTarget {
+        var target = host.target
+        target.host = target.host.trimmingCharacters(in: .whitespaces)
+        target.username = target.username.trimmingCharacters(in: .whitespaces)
+        target.port = Int(port) ?? 22
+        return target
+    }
+
+    private var savedPasswordApplies: Bool { hasSavedPassword && editedTarget == savedTarget }
+
+    private var canSave: Bool {
+        guard !editedTarget.host.isEmpty, !editedTarget.username.isEmpty else { return false }
+        return host.usesPassword ? !password.isEmpty || savedPasswordApplies : host.keyID != nil
+    }
 
     var body: some View {
         NavigationStack {
@@ -202,19 +224,40 @@ struct HostEditor: View {
                 Section {
                     TextField("Name", text: $host.name, prompt: Text(host.target.host.isEmpty ? "My server" : host.target.host))
                 }
-                Section("SSH") {
+                Section {
                     TextField("Host", text: $host.target.host, prompt: Text("server.example.com"))
+                        .accessibilityIdentifier("machine-host")
                         .textContentType(.URL)
                         .keyboardType(.URL)
                     TextField("User", text: $host.target.username, prompt: Text("me"))
-                        .textContentType(.username)
+                        .accessibilityIdentifier("machine-user")
                     TextField("Port", text: $port, prompt: Text("22"))
                         .keyboardType(.numberPad)
-                    Picker("Key", selection: $host.keyID) {
-                        Text("None").tag(UUID?.none)
-                        ForEach(keys.keys) { key in
-                            Text(key.label).tag(Optional(key.id))
+                    Picker("Log In With", selection: $host.usesPassword) {
+                        Text("SSH Key").tag(false)
+                        Text("Password").tag(true)
+                    }
+                    if host.usesPassword {
+                        // Not .password: with the app's webcredentials domain, iOS would offer to
+                        // save it to Passwords (synced) as a login for that website.
+                        SecureField("Password", text: $password, prompt: Text(savedPasswordApplies ? "Saved" : "Required"))
+                            .textContentType(.oneTimeCode)
+                            .accessibilityIdentifier("machine-password")
+                    } else {
+                        Picker("Key", selection: $host.keyID) {
+                            Text("None").tag(UUID?.none)
+                            ForEach(keys.keys) { key in
+                                Text(key.label).tag(Optional(key.id))
+                            }
                         }
+                    }
+                } header: {
+                    Text("SSH")
+                } footer: {
+                    if host.usesPassword && hasSavedPassword && !savedPasswordApplies {
+                        Text("The saved password only goes to the server and user it was saved for. Enter it again for this one.")
+                    } else if host.usesPassword {
+                        Text("Kept in this device's Keychain and never synced. An SSH key is safer, and some servers only allow keys.")
                     }
                 }
                 .textInputAutocapitalization(.never)
@@ -236,6 +279,15 @@ struct HostEditor: View {
             .onAppear {
                 port = host.target.port == 22 ? "" : String(host.target.port)
                 session = host.session ?? ""
+                hasSavedPassword = hosts.hasPassword(for: host)
+                savedTarget = host.target
+            }
+            .alert("Could not save", isPresented: Binding(
+                get: { saveError != nil }, set: { if !$0 { saveError = nil } })
+            ) {
+                Button("OK") {}
+            } message: {
+                Text(saveError ?? "")
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -243,15 +295,17 @@ struct HostEditor: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        host.target.host = host.target.host.trimmingCharacters(in: .whitespaces)
-                        host.target.username = host.target.username.trimmingCharacters(in: .whitespaces)
-                        host.target.port = Int(port) ?? 22
+                        host.target = editedTarget
                         host.session = session.isEmpty ? nil : session
                         if host.name.trimmingCharacters(in: .whitespaces).isEmpty { host.name = host.target.host }
-                        hosts.save(host)
-                        dismiss()
+                        do {
+                            try hosts.save(host, password: password.isEmpty ? nil : password)
+                            dismiss()
+                        } catch {
+                            saveError = error.localizedDescription
+                        }
                     }
-                    .disabled(host.target.host.isEmpty || host.target.username.isEmpty || host.keyID == nil)
+                    .disabled(!canSave)
                 }
             }
         }

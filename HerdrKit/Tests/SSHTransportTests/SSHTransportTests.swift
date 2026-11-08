@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import KeyStore
+import NIOEmbedded
+@preconcurrency import NIOSSH
 import Testing
 @testable import SSHTransport
 
@@ -9,6 +11,35 @@ import Testing
     let line = OpenSSH.authorizedKeysLine(key, comment: "phone")
     let parts = line.split(separator: " ")
     #expect(normalizedOpenSSHPublicKey(line) == "\(parts[0]) \(parts[1])")
+}
+
+@Test func aRejectionNamesWhatWasRejected() throws {
+    let key = try #require(SSHCredential.key(.p256(P256.Signing.PrivateKey())).rejected(username: "me").errorDescription)
+    #expect(key.contains("key for me"))
+    let password = try #require(SSHCredential.password("correct horse").rejected(username: "me").errorDescription)
+    #expect(password.contains("password for me"))
+    #expect(!password.contains("correct horse"))
+}
+
+/// A wrong password must not be sent twice, and none goes to a server that doesn't take passwords.
+@Test func aPasswordIsOfferedOnceAndOnlyWhereTaken() throws {
+    let loop = EmbeddedEventLoop()
+    func ask(_ auth: SingleOfferAuthentication, _ methods: NIOSSHAvailableUserAuthenticationMethods) throws -> NIOSSHUserAuthenticationOffer? {
+        let promise = loop.makePromise(of: NIOSSHUserAuthenticationOffer?.self)
+        auth.nextAuthenticationType(availableMethods: methods, nextChallengePromise: promise)
+        loop.run()
+        return try promise.futureResult.wait()
+    }
+    func password() -> SingleOfferAuthentication {
+        SingleOfferAuthentication(
+            username: "me", method: .password, offer: .password(.init(password: "pw")),
+            rejected: .passwordRejected(username: "me"))
+    }
+
+    let auth = password()
+    #expect(try ask(auth, .all) != nil)
+    #expect(throws: SSHTransportError.self) { try ask(auth, .all) }
+    #expect(throws: SSHTransportError.self) { try ask(password(), .publicKey) }
 }
 
 @Test func knownHostsNames() {
@@ -144,7 +175,7 @@ func logsInToSSHD() async throws {
     for (name, key) in keys {
         do {
             let connection = try await SSHConnection.connect(
-                to: target, key: key, knownHosts: InMemoryKnownHosts(), onUnknownHost: { _ in true })
+                to: target, credential: .key(key), knownHosts: InMemoryKnownHosts(), onUnknownHost: { _ in true })
             let output = try await connection.run("echo hello")
             #expect(output.trimmingCharacters(in: .whitespacesAndNewlines) == "hello", "\(name)")
             await connection.close()
@@ -176,7 +207,7 @@ func securityKeyErrorReachesTheCaller() async throws {
     let target = SSHTarget(host: "127.0.0.1", port: sshd.port, username: NSUserName())
     await #expect(throws: TappedCancel.self) {
         _ = try await SSHConnection.connect(
-            to: target, key: .securityKey(failing), knownHosts: InMemoryKnownHosts(), onUnknownHost: { _ in true })
+            to: target, credential: .key(.securityKey(failing)), knownHosts: InMemoryKnownHosts(), onUnknownHost: { _ in true })
     }
 }
 #endif
