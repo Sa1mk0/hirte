@@ -5,18 +5,198 @@ import HerdrKit
 
 @MainActor
 final class TerminalMotionTests: XCTestCase {
-    private func fixture(mouse: Bool = false, alternate: Bool = false) throws -> (VirtualTerminal, TerminalScreenModel, TerminalCanvasView) {
-        let vt = try VirtualTerminal(cols: 40, rows: 20)
+    private func fixture(mouse: Bool = false, alternate: Bool = false, rows: Int = 20) throws -> (VirtualTerminal, TerminalScreenModel, TerminalCanvasView) {
+        let vt = try VirtualTerminal(cols: 40, rows: rows)
         for row in 0..<300 { vt.write(Data("sample \(row) ready 漢 e\u{301}\r\n".utf8)) }
         if alternate { vt.write(Data("\u{1b}[?1049h".utf8)) }
         if mouse { vt.write(Data("\u{1b}[?1000h\u{1b}[?1006h".utf8)) }
         let model = TerminalScreenModel(theme: TerminalTheme.find(TerminalTheme.defaultDark, dark: true), terminal: vt)
-        let canvas = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 500, height: 380))
+        let canvas = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 500, height: CGFloat(rows) * 18 + 20))
         canvas.contentScaleFactor = 2
         canvas.model = model
         canvas.screen = model.frame
         canvas.layoutIfNeeded()
         return (vt, model, canvas)
+    }
+
+    private func remotePaint(_ vt: VirtualTerminal, offset: Int) -> ScreenFrame {
+        var output = "\u{1b}[?25l\u{1b}[?2026h"
+        for y in 0..<vt.rows {
+            let text: String
+            if y == 0 { text = "header" }
+            else if y >= vt.rows - 2 { text = "fixed footer \(y)" }
+            else { text = "item \(y + offset) ready 漢 e\u{301}" }
+            output += "\u{1b}[\(y + 1);1H" + text + "\u{1b}[K"
+        }
+        vt.write(Data((output + "\u{1b}[?2026l").utf8))
+        return vt.frame()
+    }
+
+    private func remoteWheel(_ canvas: TerminalCanvasView, rows: Int) {
+        canvas.scrollViewWillBeginDragging(canvas.scrollView)
+        move(canvas, to: canvas.scrollView.contentOffset.y + CGFloat(rows) * 18)
+    }
+
+    private func remoteImage(_ canvas: TerminalCanvasView) -> UIImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = canvas.contentScaleFactor
+        return UIGraphicsImageRenderer(size: canvas.bounds.size, format: format).image {
+            canvas.renderForTesting(in: $0.cgContext, repaint: false)
+        }
+    }
+
+    func testRemoteArrivalAndDrainPixelsUseTransformsAndKeepFooterFixed() throws {
+        for k in [1, -1, 3, -3, 9, -9] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 30)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            let before = remoteImage(canvas)
+            remoteWheel(canvas, rows: k)
+            canvas.screen = remotePaint(vt, offset: k)
+            XCTAssertEqual(canvas.remoteOffset, CGFloat(k) * 18)
+            XCTAssertEqual(remoteImage(canvas).pngData(), before.pngData(), "Arrival retains the complete previous image")
+            let draws = canvas.contentDraws
+            let rasters = canvas.textRowRasterizations
+            let footer = CGRect(x: 0, y: 514 * 2, width: 500 * 2, height: 46 * 2)
+            let footerBefore = try XCTUnwrap(before.cgImage?.cropping(to: footer))
+            let footerData = UIImage(cgImage: footerBefore).pngData()
+            var previous = abs(canvas.remoteOffset)
+            for _ in 0..<80 {
+                canvas.advanceRemoteShift(by: 1.0 / 120)
+                XCTAssertLessThanOrEqual(abs(canvas.remoteOffset), previous)
+                previous = abs(canvas.remoteOffset)
+                let image = remoteImage(canvas)
+                let crop = try XCTUnwrap(image.cgImage?.cropping(to: footer))
+                XCTAssertEqual(UIImage(cgImage: crop).pngData(), footerData)
+            }
+            XCTAssertEqual(canvas.remoteOffset, 0)
+            XCTAssertEqual(canvas.contentDraws, draws, "Draining never repaints the authoritative canvas")
+            XCTAssertEqual(canvas.textRowRasterizations, rasters)
+            let fresh = TerminalCanvasView(frame: canvas.bounds)
+            fresh.contentScaleFactor = 2
+            fresh.screen = canvas.screen
+            XCTAssertEqual(remoteImage(canvas).pngData(), remoteImage(fresh).pngData())
+        }
+    }
+
+    func testRemoteAccumulationAndOutsideStatusUpdatePreservePresentedImage() throws {
+        for k in [1, -1] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: k)
+            canvas.screen = remotePaint(vt, offset: k)
+            canvas.advanceRemoteShift(by: 0.02)
+            let image = remoteImage(canvas).pngData()
+            let offset = canvas.remoteOffset
+            remoteWheel(canvas, rows: k)
+            canvas.screen = remotePaint(vt, offset: k * 2)
+            XCTAssertEqual(canvas.remoteOffset, offset + CGFloat(k) * 18, accuracy: 0.001)
+            XCTAssertEqual(remoteImage(canvas).pngData(), image, "A response mid-drain preserves the presented strip")
+            var status = canvas.screen
+            status.lines[19][0].text = "changed status"
+            canvas.screen = status
+            XCTAssertEqual(canvas.remoteOffset, offset + CGFloat(k) * 18, accuracy: 0.001)
+        }
+    }
+
+    func testRemoteFallbacksSnapToTheAuthoritativeFrame() throws {
+        for action in 0..<10 {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: 1)
+            canvas.screen = remotePaint(vt, offset: 1)
+            XCTAssertNotEqual(canvas.remoteOffset, 0)
+            switch action {
+            case 0:
+                var changed = canvas.screen
+                changed.lines[8][0].text = "non-shift update"
+                canvas.screen = changed
+            case 1:
+                remoteWheel(canvas, rows: -1)
+                canvas.screen = remotePaint(vt, offset: 0)
+            case 2: canvas.cancelScrolling()
+            case 3:
+                let (_, replacement, _) = try fixture()
+                canvas.model = replacement
+                replacement.stop()
+            case 4:
+                canvas.frame.size.width -= 20
+                canvas.layoutIfNeeded()
+            case 5: canvas.fontSize = 14
+            case 6:
+                // A visible cursor entering the moving band must cancel it too.
+                vt.write(Data("\u{1b}[9;1H\u{1b}[?25h".utf8))
+                canvas.screen = vt.frame()
+            case 7:
+                remoteWheel(canvas, rows: 9)
+                canvas.screen = remotePaint(vt, offset: 10)
+            case 8:
+                var changedRegion = remotePaint(vt, offset: 2)
+                changedRegion.lines[1] = canvas.screen.lines[1]
+                canvas.screen = changedRegion
+            default:
+                canvas.watching = true
+                canvas.layoutIfNeeded()
+            }
+            XCTAssertEqual(canvas.remoteOffset, 0, "Snap action \(action)")
+        }
+    }
+
+    func testRemoteRetainedRowTapIsConsumedAndCurrentRowsUseInverseMapping() throws {
+        for retained in [false, true] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+            defer { model.stop() }
+            var input: [Data] = []
+            model.sentInputForTesting = { input.append($0) }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: 3)
+            canvas.screen = remotePaint(vt, offset: 3)
+            let count = input.count
+            canvas.handleTap(at: CGPoint(x: 20, y: retained ? 37 : 190))
+            XCTAssertEqual(canvas.remoteOffset, 0)
+            if retained { XCTAssertEqual(input.count, count, "No remote click targets a retained row") }
+            else {
+                XCTAssertGreaterThan(input.count, count)
+                XCTAssertTrue(String(decoding: input[count], as: UTF8.self).hasPrefix("\u{1b}[<0;2;8M"))
+            }
+        }
+    }
+
+    func testRemoteBandVisualsAtPhoneAndDuoSizes() throws {
+        for dark in [false, true] {
+            for (name, size) in [("phone", CGSize(width: 320, height: 640)),
+                                 ("duo", CGSize(width: 669, height: 951))] {
+                let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 30)
+                defer { model.stop(); canvas.cancelScrolling() }
+                canvas.frame.size = size
+                canvas.contentScaleFactor = 3
+                canvas.overrideUserInterfaceStyle = dark ? .dark : .light
+                let colors = dark ? "ffffff;101010" : "161616;eeeeee"
+                let pair = colors.split(separator: ";")
+                vt.write(Data("\u{1b}]10;#\(pair[0])\u{07}\u{1b}]11;#\(pair[1])\u{07}".utf8))
+                canvas.screen = remotePaint(vt, offset: 0)
+                canvas.layoutIfNeeded()
+                let before = remoteImage(canvas)
+                remoteWheel(canvas, rows: 3)
+                canvas.screen = remotePaint(vt, offset: 3)
+                let arrival = remoteImage(canvas)
+                if let folder = ProcessInfo.processInfo.environment["HIRTE_SHOTS"] {
+                    let base = URL(fileURLWithPath: folder).appendingPathComponent("remote-\(name)-\(dark ? "dark" : "light")")
+                    try before.pngData()?.write(to: base.appendingPathExtension("before.png"))
+                    try arrival.pngData()?.write(to: base.appendingPathExtension("arrival.png"))
+                }
+                XCTAssertEqual(arrival.pngData(), before.pngData())
+                canvas.advanceRemoteShift(by: 0.025)
+                let during = remoteImage(canvas)
+                if let folder = ProcessInfo.processInfo.environment["HIRTE_SHOTS"] {
+                    try during.pngData()?.write(to: URL(fileURLWithPath: folder)
+                        .appendingPathComponent("remote-\(name)-\(dark ? "dark" : "light").png"))
+                }
+                canvas.cancelScrolling()
+            }
+        }
     }
 
     private func move(_ canvas: TerminalCanvasView, to offset: CGFloat) {
@@ -204,7 +384,7 @@ final class TerminalMotionTests: XCTestCase {
         XCTAssertEqual(model.scrollRoute, .disabled)
     }
 
-    func testRemoteWheelOrderNoInterpolationAndNoInputAfterCancellationOrReplacement() throws {
+    func testRemoteWheelOrderNoPredictionAndNoInputAfterCancellationOrReplacement() throws {
         for mouse in [false, true] {
             let (_, model, canvas) = try fixture(mouse: mouse, alternate: true)
             defer { model.stop() }

@@ -426,7 +426,9 @@ private actor DemoEngine {
     private func scrollLabPaint(_ channel: UInt32, offset: Int) -> String {
         let rows = terminals.first { $0.address == views[channel]?.address }?.rows ?? 24
         return "\u{1b}[?2026h\u{1b}[H" + (0..<rows).map {
-            "\u{1b}[\($0 + 1);1Hitem \(offset + $0) ready 漢 e\u{301}\u{1b}[K"
+            "\u{1b}[\($0 + 1);1H" + ($0 < rows - 2
+                ? "item \(offset + $0) ready 漢 e\u{301}"
+                : ($0 == rows - 2 ? "Composer: type a message" : "Status: connected")) + "\u{1b}[K"
         }.joined() + "\u{1b}[?2026l"
     }
 

@@ -336,7 +336,7 @@ final class TerminalScreenModel {
     }
 
     /// Local gestures publish a matching viewport in the same UIKit callback. Network output
-    /// still uses the existing coalescing/DEC2026 path; remote content is never interpolated.
+    /// still uses the existing coalescing/DEC2026 path; the canvas may ease verified row shifts.
     func scrollHistory(by lines: Int) -> ScreenFrame {
         guard scrollRoute == .history, let vt, let bar = vt.scrollbar else { return frame }
         // Output may prune the VT before its scheduled snapshot. Apply native movement
