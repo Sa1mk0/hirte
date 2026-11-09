@@ -127,7 +127,7 @@ final class TerminalCanvasView: UIView, UITextInput {
     private let remoteClip = UIView()
     private let remoteContent = TerminalContentView()
     private(set) var remoteRegion: Swift.Range<Int>?
-    private var remoteStrip: [[ScreenCell]] = []
+    private(set) var remoteStrip: [[ScreenCell]] = []
     private(set) var remoteOffset: CGFloat = 0
     private var remoteDirection = 0
     private var lastWheelSign = 0
@@ -636,7 +636,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
         guard let shift = detected else {
             if let trimmed = remoteBandTrimmedPastChangedEdges(from: old) {
-                let leaving = remoteLeavingRows(reanchoredTo: trimmed, from: old)
+                let leaving = remoteLeavingRows(for: trimmed, rows: 0, direction: remoteDirection, from: old)
                 let band = Array(screen.lines[trimmed])
                 remoteStrip = remoteDirection > 0 ? leaving + band : band + leaving
                 remoteRegion = trimmed
@@ -647,39 +647,40 @@ final class TerminalCanvasView: UIView, UITextInput {
             return
         }
         let direction = shift.rows > 0 ? 1 : -1
-        var leaving: [[ScreenCell]] = []
+        var target = shift.region
         if let region = remoteRegion {
             let edgeDelta = abs(region.lowerBound - shift.region.lowerBound)
                 + abs(region.upperBound - shift.region.upperBound)
-            if direction == remoteDirection, edgeDelta <= 2 {
-                leaving = remoteLeavingRows(reanchoredTo: shift.region, from: old)
-            } else {
+            if direction == remoteDirection, shift.region.lowerBound >= region.lowerBound,
+               shift.region.upperBound <= region.upperBound, keepsRemoteBand(region, rows: shift.rows, from: old) {
+                // Bunched rows can make blank edge rows look unchanged; the established band
+                // still follows this shift row by row, so keep it rather than restart.
+                target = region
+            } else if direction != remoteDirection || edgeDelta > 2 {
                 snapRemoteShift(reason: direction != remoteDirection ? "direction-change" : "band-change")
             }
         }
         let height = geometry().cellHeight
         remoteDrain.arrived(rows: shift.rows, cellHeight: height, time: now)
         let offset = remoteOffset + CGFloat(shift.rows) * height
-        guard abs(offset) <= CGFloat(min(12, shift.region.count / 2)) * height else {
+        guard abs(offset) <= CGFloat(min(12, target.count / 2)) * height else {
             snapRemoteShift(reason: "backlog-limit")
             return
         }
-        let band = Array(screen.lines[shift.region])
-        let previous = Array(old.lines[shift.region])
-        if direction > 0 {
-            remoteStrip = leaving + Array(previous.prefix(shift.rows)) + band
-        } else {
-            remoteStrip = band + Array(previous.suffix(-shift.rows)) + leaving
-        }
-        // Retain only rows that can still be exposed by the residual. This also bounds memory
-        // across a long fling, independently of how many remote frames have arrived.
-        let count = shift.region.count + Int(ceil(abs(offset) / height))
+        let leaving = remoteLeavingRows(for: target, rows: shift.rows, direction: direction, from: old)
+        let band = Array(screen.lines[target])
+        remoteStrip = direction > 0 ? leaving + band : band + leaving
+        // Retain only rows that can still be exposed by the residual, plus two for a band
+        // edge that moves next frame. This bounds memory across a long fling.
+        let count = target.count + Int(ceil(abs(offset) / height)) + 2
         if remoteStrip.count > count {
             remoteStrip = direction > 0 ? Array(remoteStrip.suffix(count)) : Array(remoteStrip.prefix(count))
         }
-        remoteRegion = shift.region
+        remoteRegion = target
         remoteDirection = direction
         remoteOffset = offset
+        // Rows the strip cannot supply show the terminal background, never the frame below.
+        remoteClip.backgroundColor = UIColor(screen.background)
         remoteClip.isHidden = false
         remoteContent.setNeedsDisplay()
         if remoteLink == nil {
@@ -698,21 +699,35 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
     }
 
-    /// Retained leaving rows are anchored to the band's leaving edge, even when the
-    /// sticky header joins/leaves it. The entering edge only changes the current band.
-    private func remoteLeavingRows(reanchoredTo band: Swift.Range<Int>, from old: ScreenFrame) -> [[ScreenCell]] {
-        guard let region = remoteRegion else { return [] }
-        let retained = max(0, remoteStrip.count - region.count)
-        var leaving = remoteDirection > 0 ? Array(remoteStrip.prefix(retained)) : Array(remoteStrip.suffix(retained))
-        let delta = remoteDirection > 0 ? band.lowerBound - region.lowerBound : region.upperBound - band.upperBound
-        if delta > 0 {
-            let rows = remoteDirection > 0 ? Array(old.lines[region.lowerBound..<band.lowerBound])
-                : Array(old.lines[band.upperBound..<region.upperBound])
-            leaving = remoteDirection > 0 ? leaving + rows : rows + leaving
-        } else if delta < 0 {
-            leaving = remoteDirection > 0 ? Array(leaving.dropLast(-delta)) : Array(leaving.dropFirst(-delta))
+    /// The rows leaving the new band, taken from one continuous column: the retained
+    /// leaving rows plus the band as it stood in `old`. A row's content position is kept,
+    /// so a band edge that moves (Codex's sticky header joining or leaving) never splices
+    /// a fixed row into the transcript or leaves a gap. `rows` is this frame's shift.
+    private func remoteLeavingRows(for band: Swift.Range<Int>, rows: Int, direction: Int,
+                                   from old: ScreenFrame) -> [[ScreenCell]] {
+        let region = remoteRegion ?? band
+        let retained = remoteRegion == nil ? 0 : max(0, remoteStrip.count - region.count)
+        if direction > 0 {
+            let column = Array(remoteStrip.prefix(retained)) + Array(old.lines[region])
+            let count = retained + band.lowerBound - region.lowerBound + rows
+            return Array(column.prefix(min(max(0, count), column.count)))
         }
-        return leaving
+        let column = Array(old.lines[region]) + Array(remoteStrip.suffix(retained))
+        let count = retained + region.upperBound - band.upperBound - rows
+        return Array(column.suffix(min(max(0, count), column.count)))
+    }
+
+    /// Whether every row of the established band still follows a `rows` shift (entering
+    /// rows excepted), with no cursor or selection in it.
+    private func keepsRemoteBand(_ region: Swift.Range<Int>, rows: Int, from old: ScreenFrame) -> Bool {
+        for y in region where region.contains(y + rows) {
+            if !screen.rowLooksEqual(y, to: old, y + rows) { return false }
+        }
+        for frame in [old, screen] {
+            if let cursor = frame.cursor, region.contains(cursor.y) { return false }
+            if region.contains(where: { frame.selection.indices.contains($0) && frame.selection[$0] != nil }) { return false }
+        }
+        return true
     }
 
     /// A header-only repaint has no translation to detect. Keep only the unchanged

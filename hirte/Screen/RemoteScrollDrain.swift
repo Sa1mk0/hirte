@@ -68,6 +68,9 @@ struct RemoteScrollDrain {
         let backlog = abs(offset)
         let speed = abs(velocity)
         let goal = cellHeight / 2 + min(speed * 0.015, 1.5 * cellHeight)
+        // A gain below 1 keeps the band behind a program that ignores reports; above the
+        // goal it would let the backlog grow into the snap limit at the start of a fling.
+        let gain = backlog > goal ? max(gain, 1) : gain
         let rate = max(speed * gain + (backlog - goal) / 0.25,
                        (backlog - 2 * cellHeight) / 0.04, 0)
         let remaining = backlog - min(backlog, rate * dt)

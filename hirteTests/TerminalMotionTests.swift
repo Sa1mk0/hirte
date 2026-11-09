@@ -186,6 +186,72 @@ final class TerminalMotionTests: XCTestCase {
         }
     }
 
+    /// Codex's sticky header joins and leaves the scrolling band mid-glide. The strip must stay
+    /// one continuous transcript column (no header copy spliced in, no missing row) and hold
+    /// enough leaving rows to cover the residual offset at every step.
+    func testRemoteStripStaysOneContinuousColumnWhileTheStickyHeaderJoinsAndLeaves() throws {
+        func text(_ line: [ScreenCell]) -> String { line.map(\.text).joined().trimmingCharacters(in: .whitespaces) }
+        for k in [1, -1] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 26)
+            defer { model.stop(); canvas.cancelScrolling() }
+            let template = remotePaint(vt, offset: 0)
+            func row(_ value: String) -> [ScreenCell] {
+                var line = template.lines[1]
+                for i in line.indices { line[i].text = "" }
+                for (i, character) in value.enumerated() where i < line.count { line[i].text = String(character) }
+                return line
+            }
+            func frame(scroll: Int, sticky: Bool) -> ScreenFrame {
+                var frame = template
+                for y in 0..<24 { frame.lines[y] = row("T\(100 + scroll + y)") }
+                if sticky { frame.lines[0] = row("HEADER") }
+                return frame
+            }
+            canvas.screen = frame(scroll: 0, sticky: true)
+            var scroll = 0
+            for (step, sticky) in [true, true, true, false, false, true, true, false, true, false].enumerated() {
+                scroll += k
+                remoteWheel(canvas, rows: k)
+                canvas.screen = frame(scroll: scroll, sticky: sticky)
+                let region = try XCTUnwrap(canvas.remoteRegion, "Glide at scroll \(scroll)")
+                var texts = canvas.remoteStrip.map(text)
+                // Scrolling back, a reappearing sticky header is indistinguishable from a row
+                // entering at the top; it may only ever be that first entering row.
+                if k < 0, texts.first == "HEADER" { texts.removeFirst() }
+                XCTAssertFalse(texts.contains("HEADER"), "No fixed header copy in the strip: \(texts)")
+                let numbers = texts.compactMap { Int($0.dropFirst()) }
+                XCTAssertEqual(numbers.count, texts.count, "\(texts)")
+                XCTAssertEqual(numbers, Array((numbers.first ?? 0)..<((numbers.first ?? 0) + numbers.count)),
+                               "One continuous column at scroll \(scroll)")
+                // Once rows have scrolled out, the strip covers the residual except for at most
+                // the one row the header always hid (shown as background, never the frame below).
+                if step >= 3 {
+                    let leaving = canvas.remoteStrip.count - region.count
+                    XCTAssertGreaterThanOrEqual(CGFloat(leaving + 1) * 18, abs(canvas.remoteOffset) - 0.001,
+                                                "Leaving rows cover the residual at scroll \(scroll)")
+                }
+                canvas.advanceRemoteShift(by: 0.008)
+            }
+            assertRemoteDrainMatchesFreshCanvas(canvas)
+        }
+    }
+
+    func testRemoteDrainNeverSlowsBelowNativeSpeedAboveItsGoal() {
+        for gain: CGFloat in [0.25, 0.5, 1] {
+            let slowed = RemoteScrollDrain.remaining(offset: 100, cellHeight: 18, velocity: 3000,
+                                                     velocityAge: 0.008, gain: gain, dt: 1.0 / 120)
+            let native = RemoteScrollDrain.remaining(offset: 100, cellHeight: 18, velocity: 3000,
+                                                     velocityAge: 0.008, gain: 1, dt: 1.0 / 120)
+            XCTAssertEqual(slowed, native, accuracy: 0.0001, "gain \(gain)")
+        }
+        // Below the goal a low gain still keeps the band behind a program that ignores reports.
+        let behind = RemoteScrollDrain.remaining(offset: 9, cellHeight: 18, velocity: 400,
+                                                 velocityAge: 0.008, gain: 0.25, dt: 1.0 / 120)
+        let matched = RemoteScrollDrain.remaining(offset: 9, cellHeight: 18, velocity: 400,
+                                                  velocityAge: 0.008, gain: 1, dt: 1.0 / 120)
+        XCTAssertGreaterThan(behind, matched)
+    }
+
     func testRemoteHeaderOnlyRepaintTrimsChangedEdgesWithoutDroppingResidual() throws {
         for k in [1, -1] {
             for changedRows in [[0], [0, 1], [23], [22, 23], [0, 23], [0, 1, 2]] {
