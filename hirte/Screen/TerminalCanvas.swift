@@ -126,12 +126,13 @@ final class TerminalCanvasView: UIView, UITextInput {
     private let contentClip = UIView()
     private let remoteClip = UIView()
     private let remoteContent = TerminalContentView()
-    private var remoteRegion: Swift.Range<Int>?
+    private(set) var remoteRegion: Swift.Range<Int>?
     private var remoteStrip: [[ScreenCell]] = []
     private(set) var remoteOffset: CGFloat = 0
     private var remoteDirection = 0
     private var lastWheelSign = 0
-    private var lastWheelTime: CFTimeInterval = 0
+    private var lastWheelTimes: [Int: CFTimeInterval] = [:]
+    private var remoteDrain = RemoteScrollDrain()
     private var remoteLink: CADisplayLink?
     private var remoteTickTime: CFTimeInterval = 0
     private let scrollThumb = UIView()
@@ -615,37 +616,60 @@ final class TerminalCanvasView: UIView, UITextInput {
               old.cols == screen.cols, old.rows == screen.rows,
               old.lines.count == screen.lines.count,
               old.foreground == screen.foreground, old.background == screen.background
-        else { snapRemoteShift(); return }
+        else { snapRemoteShift(reason: "presentation"); return }
         if let region = remoteRegion {
             let unchanged = region.allSatisfy { y in
-                old.lines[y] == screen.lines[y]
+                screen.rowLooksEqual(y, to: old, y)
                     && (old.selection.indices.contains(y) ? old.selection[y] : nil)
                         == (screen.selection.indices.contains(y) ? screen.selection[y] : nil)
             }
             let cursorInside = [old.cursor, screen.cursor].contains { $0.map { region.contains($0.y) } ?? false }
             if unchanged && !cursorInside { return }
         }
-        guard let shift = screen.shift(from: old, wheelSign: lastWheelSign,
-                                       wheelAge: CACurrentMediaTime() - lastWheelTime)
-        else { snapRemoteShift(); return }
-        let direction = shift.rows > 0 ? 1 : -1
-        if let region = remoteRegion, region != shift.region || direction != remoteDirection {
-            snapRemoteShift()
+        let now = CACurrentMediaTime()
+        var detected = screen.shift(from: old, wheelSign: lastWheelSign,
+                                    wheelAge: now - (lastWheelTimes[lastWheelSign] ?? 0))
+        // Replies from before a reversal can still be in flight. Try that input's sign
+        // once, under the same age/evidence rules; never predict a response.
+        if detected == nil, let previous = lastWheelTimes[-lastWheelSign] {
+            detected = screen.shift(from: old, wheelSign: -lastWheelSign, wheelAge: now - previous)
+        }
+        guard let shift = detected else {
+            if let trimmed = remoteBandTrimmedPastChangedEdges(from: old) {
+                let leaving = remoteLeavingRows(reanchoredTo: trimmed, from: old)
+                let band = Array(screen.lines[trimmed])
+                remoteStrip = remoteDirection > 0 ? leaving + band : band + leaving
+                remoteRegion = trimmed
+                remoteContent.setNeedsDisplay()
+                return
+            }
+            snapRemoteShift(reason: "unverified-frame")
             return
         }
+        let direction = shift.rows > 0 ? 1 : -1
+        var leaving: [[ScreenCell]] = []
+        if let region = remoteRegion {
+            let edgeDelta = abs(region.lowerBound - shift.region.lowerBound)
+                + abs(region.upperBound - shift.region.upperBound)
+            if direction == remoteDirection, edgeDelta <= 2 {
+                leaving = remoteLeavingRows(reanchoredTo: shift.region, from: old)
+            } else {
+                snapRemoteShift(reason: direction != remoteDirection ? "direction-change" : "band-change")
+            }
+        }
         let height = geometry().cellHeight
+        remoteDrain.arrived(rows: shift.rows, cellHeight: height, time: now)
         let offset = remoteOffset + CGFloat(shift.rows) * height
         guard abs(offset) <= CGFloat(min(12, shift.region.count / 2)) * height else {
-            snapRemoteShift()
+            snapRemoteShift(reason: "backlog-limit")
             return
         }
         let band = Array(screen.lines[shift.region])
         let previous = Array(old.lines[shift.region])
-        let retained = max(0, remoteStrip.count - shift.region.count)
         if direction > 0 {
-            remoteStrip = Array(remoteStrip.prefix(retained)) + Array(previous.prefix(shift.rows)) + band
+            remoteStrip = leaving + Array(previous.prefix(shift.rows)) + band
         } else {
-            remoteStrip = band + Array(previous.suffix(-shift.rows)) + Array(remoteStrip.suffix(retained))
+            remoteStrip = band + Array(previous.suffix(-shift.rows)) + leaving
         }
         // Retain only rows that can still be exposed by the residual. This also bounds memory
         // across a long fling, independently of how many remote frames have arrived.
@@ -674,15 +698,57 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
     }
 
+    /// Retained leaving rows are anchored to the band's leaving edge, even when the
+    /// sticky header joins/leaves it. The entering edge only changes the current band.
+    private func remoteLeavingRows(reanchoredTo band: Swift.Range<Int>, from old: ScreenFrame) -> [[ScreenCell]] {
+        guard let region = remoteRegion else { return [] }
+        let retained = max(0, remoteStrip.count - region.count)
+        var leaving = remoteDirection > 0 ? Array(remoteStrip.prefix(retained)) : Array(remoteStrip.suffix(retained))
+        let delta = remoteDirection > 0 ? band.lowerBound - region.lowerBound : region.upperBound - band.upperBound
+        if delta > 0 {
+            let rows = remoteDirection > 0 ? Array(old.lines[region.lowerBound..<band.lowerBound])
+                : Array(old.lines[band.upperBound..<region.upperBound])
+            leaving = remoteDirection > 0 ? leaving + rows : rows + leaving
+        } else if delta < 0 {
+            leaving = remoteDirection > 0 ? Array(leaving.dropLast(-delta)) : Array(leaving.dropFirst(-delta))
+        }
+        return leaving
+    }
+
+    /// A header-only repaint has no translation to detect. Keep only the unchanged
+    /// interior: never animate a changed edge row or a cursor/selection in the band.
+    private func remoteBandTrimmedPastChangedEdges(from old: ScreenFrame) -> Swift.Range<Int>? {
+        guard let region = remoteRegion else { return nil }
+        let changed = region.filter { !screen.rowLooksEqual($0, to: old, $0) }
+        guard !changed.isEmpty else { return nil }
+        let lower = (changed.last { $0 < region.lowerBound + 2 }).map { $0 + 1 } ?? region.lowerBound
+        let upper = changed.first { $0 >= region.upperBound - 2 } ?? region.upperBound
+        guard upper - lower >= 8,
+              lower - region.lowerBound + region.upperBound - upper <= 2 else { return nil }
+        let trimmed = lower..<upper
+        guard changed.allSatisfy({ !trimmed.contains($0) }) else { return nil }
+        for frame in [old, screen] {
+            if let cursor = frame.cursor, trimmed.contains(cursor.y) { return nil }
+            if trimmed.contains(where: { frame.selection.indices.contains($0) && frame.selection[$0] != nil }) { return nil }
+        }
+        return trimmed
+    }
+
     /// Transform commits only: no row invalidation or text rasterization during the drain.
     func advanceRemoteShift(by dt: TimeInterval) {
         guard remoteOffset != 0 else { return }
-        remoteOffset *= exp(-max(0, dt) / 0.04)
-        if abs(remoteOffset) * max(contentScaleFactor, 1) < 1 { snapRemoteShift() }
+        remoteOffset = remoteDrain.remaining(offset: remoteOffset, cellHeight: geometry().cellHeight,
+                                            time: CACurrentMediaTime(), dt: dt)
+        if abs(remoteOffset) * max(contentScaleFactor, 1) < 1 { snapRemoteShift(reason: "settled") }
         else { layoutContent() }
     }
 
-    private func snapRemoteShift() {
+    private func snapRemoteShift(reason: String = "cancel") {
+        #if DEBUG
+        if reason != "settled", configuredRoute == .remote {
+            TerminalScrollTrace.shared?.remoteSnap(reason: reason, offset: remoteOffset)
+        }
+        #endif
         remoteLink?.invalidate()
         remoteLink = nil
         remoteOffset = 0
@@ -1229,7 +1295,8 @@ final class TerminalCanvasView: UIView, UITextInput {
         #endif
         snapRemoteShift()
         lastWheelSign = 0
-        lastWheelTime = 0
+        lastWheelTimes.removeAll(keepingCapacity: true)
+        remoteDrain = RemoteScrollDrain()
         motionGeneration = nil
         model?.setScrollActive(false)
         wasDecelerating = false
@@ -1761,6 +1828,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
             applyingScroll = true
             scrollView.contentOffset.y = Self.remoteScrollOrigin
             remoteRow = Int(floor(Self.remoteScrollOrigin / geometry().cellHeight))
+            remoteDrain.begin(at: scrollView.contentOffset.y, time: CACurrentMediaTime())
             applyingScroll = false
         }
         motionGeneration = model.scrollGeneration
@@ -1805,11 +1873,12 @@ extension TerminalCanvasView: UIScrollViewDelegate {
             // Changed rows repaint through `invalidate(from:)`; a fraction alone only moves them.
             screen = frame
         case .remote:
+            remoteDrain.moved(to: offset, time: CACurrentMediaTime())
             let lines = row - remoteRow
             remoteRow = row
             if lines != 0 {
                 lastWheelSign = lines > 0 ? 1 : -1
-                lastWheelTime = CACurrentMediaTime()
+                lastWheelTimes[lastWheelSign] = CACurrentMediaTime()
                 model.scroll(lines: lines, column: remoteCell.x, row: remoteCell.y)
             }
         case .disabled: break
@@ -1829,6 +1898,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         #endif
         wasDecelerating = decelerate
         if !decelerate {
+            remoteDrain.stop()
             motionGeneration = nil
             model?.setScrollActive(false)
             synchronizeScrolling()
@@ -1840,6 +1910,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         TerminalScrollTrace.shared?.record("stop", offset: scrollView.contentOffset.y)
         #endif
         wasDecelerating = false
+        remoteDrain.stop()
         motionGeneration = nil
         model?.setScrollActive(false)
         synchronizeScrolling()

@@ -134,13 +134,248 @@ final class TerminalMotionTests: XCTestCase {
                 canvas.screen = remotePaint(vt, offset: 10)
             case 8:
                 var changedRegion = remotePaint(vt, offset: 2)
-                changedRegion.lines[1] = canvas.screen.lines[1]
+                for y in 1..<12 { changedRegion.lines[y] = canvas.screen.lines[y] }
                 canvas.screen = changedRegion
             default:
                 canvas.watching = true
                 canvas.layoutIfNeeded()
             }
-            XCTAssertEqual(canvas.remoteOffset, 0, "Snap action \(action)")
+            let expected: CGFloat = action == 1 ? -18 : (action == 8 ? 18 : 0)
+            XCTAssertEqual(canvas.remoteOffset, expected, "Snap/restart action \(action)")
+        }
+    }
+
+    private func shifted(_ old: ScreenFrame, rows: Int, band: Range<Int>, serial: Int) -> ScreenFrame {
+        var frame = old
+        for y in band {
+            if band.contains(y + rows) { frame.lines[y] = old.lines[y + rows] }
+            else { frame.lines[y][0].text = "arrival \(serial) row \(y)" }
+        }
+        if band.lowerBound == 1 { frame.lines[0][0].text = "header \(serial)" }
+        return frame
+    }
+
+    private func assertRemoteDrainMatchesFreshCanvas(_ canvas: TerminalCanvasView, file: StaticString = #filePath, line: UInt = #line) {
+        for _ in 0..<100 { canvas.advanceRemoteShift(by: 1.0 / 120) }
+        XCTAssertEqual(canvas.remoteOffset, 0, file: file, line: line)
+        let fresh = TerminalCanvasView(frame: canvas.bounds)
+        fresh.contentScaleFactor = canvas.contentScaleFactor
+        fresh.screen = canvas.screen
+        XCTAssertEqual(remoteImage(canvas).pngData(), remoteImage(fresh).pngData(),
+                       "Including the exact authoritative header pixels", file: file, line: line)
+    }
+
+    func testRemoteBandReanchorsWhenHeaderJoinsAndLeavesInBothDirections() throws {
+        for k in [1, -1] {
+            for initialLower in [0, 1] {
+                let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 26)
+                defer { model.stop(); canvas.cancelScrolling() }
+                canvas.screen = remotePaint(vt, offset: 0)
+                for serial in 1...4 {
+                    let lower = serial.isMultiple(of: 2) ? 1 - initialLower : initialLower
+                    let band = lower..<24
+                    let previous = canvas.remoteOffset
+                    remoteWheel(canvas, rows: k)
+                    canvas.screen = shifted(canvas.screen, rows: k, band: band, serial: serial)
+                    XCTAssertEqual(canvas.remoteRegion, band)
+                    XCTAssertEqual(canvas.remoteOffset, previous + CGFloat(k) * 18, accuracy: 0.001)
+                    canvas.advanceRemoteShift(by: 0.012)
+                }
+                assertRemoteDrainMatchesFreshCanvas(canvas)
+            }
+        }
+    }
+
+    func testRemoteHeaderOnlyRepaintTrimsChangedEdgesWithoutDroppingResidual() throws {
+        for k in [1, -1] {
+            for changedRows in [[0], [0, 1], [23], [22, 23], [0, 23], [0, 1, 2]] {
+                let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 26)
+                defer { model.stop(); canvas.cancelScrolling() }
+                canvas.screen = remotePaint(vt, offset: 0)
+                remoteWheel(canvas, rows: k)
+                canvas.screen = shifted(canvas.screen, rows: k, band: 0..<24, serial: 1)
+                canvas.advanceRemoteShift(by: 0.012)
+                let offset = canvas.remoteOffset
+                var repaint = canvas.screen
+                for y in changedRows { repaint.lines[y][0].text = "new edge \(y)" }
+                canvas.screen = repaint
+                if changedRows.count <= 2 {
+                    XCTAssertEqual(canvas.remoteOffset, offset)
+                    let band = try XCTUnwrap(canvas.remoteRegion)
+                    XCTAssertGreaterThanOrEqual(band.count, 8)
+                    XCTAssertTrue(changedRows.allSatisfy { !band.contains($0) })
+                } else {
+                    XCTAssertEqual(canvas.remoteOffset, 0, "A change wider than two rows still snaps")
+                }
+                assertRemoteDrainMatchesFreshCanvas(canvas)
+            }
+        }
+    }
+
+    func testRemoteInvisibleBlankRepaintKeepsGlidingButVisibleInkSnaps() throws {
+        let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+        defer { model.stop(); canvas.cancelScrolling() }
+        canvas.screen = remotePaint(vt, offset: 0)
+        remoteWheel(canvas, rows: 1)
+        canvas.screen = remotePaint(vt, offset: 1)
+        let offset = canvas.remoteOffset
+        var repaint = canvas.screen
+        let column = repaint.lines[8].count - 1
+        XCTAssertTrue(repaint.lines[8][column].text.isEmpty)
+        repaint.lines[8][column].text = " "
+        repaint.lines[8][column].style.foreground = RGB(r: 255, g: 0, b: 0)
+        repaint.lines[8][column].style.faint = true
+        canvas.screen = repaint
+        XCTAssertEqual(canvas.remoteOffset, offset)
+        repaint.lines[8][column].style.underline = true
+        canvas.screen = repaint
+        XCTAssertEqual(canvas.remoteOffset, 0)
+        assertRemoteDrainMatchesFreshCanvas(canvas)
+    }
+
+    func testRemoteEdgeTrimRequiresAtLeastEightVerifiedRows() throws {
+        for count in [9, 10] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true, rows: 26)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: 1)
+            canvas.screen = shifted(canvas.screen, rows: 1, band: 0..<count, serial: 1)
+            XCTAssertEqual(canvas.remoteRegion, 0..<count)
+            let offset = canvas.remoteOffset
+            var edge = canvas.screen
+            edge.lines[0][0].text = "new header"
+            edge.lines[1][0].text = "new subheader"
+            canvas.screen = edge
+            XCTAssertEqual(canvas.remoteOffset, count == 10 ? offset : 0)
+            if count == 10 { XCTAssertEqual(canvas.remoteRegion, 2..<10) }
+            assertRemoteDrainMatchesFreshCanvas(canvas)
+        }
+    }
+
+    func testRemoteRepliesInFlightUseTheRecentWheelSignOnceAfterReversal() async throws {
+        for expired in [false, true] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: 1)
+            canvas.screen = remotePaint(vt, offset: 1)
+            if expired { try await Task.sleep(for: .milliseconds(320)) }
+            let residual = canvas.remoteOffset
+            remoteWheel(canvas, rows: -1)
+            // The reply belongs to the preceding positive wheel, not the latest input.
+            canvas.screen = remotePaint(vt, offset: 2)
+            XCTAssertEqual(canvas.remoteOffset, expired ? 0 : residual + 18, accuracy: 0.001)
+        }
+    }
+
+    func testRemoteDrainMatchesSteadyNativeMotionAndBoundsBacklog() {
+        let dt = 1.0 / 120
+        for speed: CGFloat in [72, 400, 3000] {
+            var offset: CGFloat = 0
+            var periodSteps: [Int: CGFloat] = [:]
+            var ratios: [CGFloat] = []
+            for tick in 1...720 {
+                let time = Double(tick) * dt
+                let before = Double(tick - 1) * dt
+                let arrived = Int(floor(time * speed / 18 + 1e-8)) - Int(floor(before * speed / 18 + 1e-8))
+                offset += CGFloat(arrived) * 18
+                let remaining = RemoteScrollDrain.remaining(offset: offset, cellHeight: 18,
+                    velocity: speed, velocityAge: 0, dt: dt)
+                let step = offset - remaining
+                offset = remaining
+                XCTAssertGreaterThanOrEqual(offset, 0)
+                XCTAssertLessThanOrEqual(offset, 36)
+                if time > 1 {
+                    ratios.append(step / (speed * dt))
+                    if speed != 72 { XCTAssertEqual(step, speed * dt, accuracy: 0.25 * speed * dt) }
+                }
+                // At 72 pt/s the period is 250 ms, equal to the correction time constant:
+                // test the period mean, not an incompatible pointwise ±25% requirement.
+                if speed == 72 { periodSteps[(tick - 1) / 30, default: 0] += step }
+            }
+            if speed == 72 {
+                for period in 1..<24 { XCTAssertEqual(periodSteps[period]!, 18, accuracy: 18 * 0.25) }
+            }
+            print("REMOTE_DRAIN_STEADY speed=\(speed) tick_ratio_min=\(ratios.min()!) max=\(ratios.max()!) backlog_pt=\(offset)")
+        }
+    }
+
+    func testRemoteDrainSettlesExactlyLikeOldFollowerWithoutForwardNativeMotion() {
+        for sign: CGFloat in [1, -1] {
+            for (velocity, age): (CGFloat, Double) in [(0, 0), (24, 0), (400, 0.05), (400, 1), (-400, 0)] {
+                var offset = sign * 108
+                for _ in 0..<60 {
+                    let previous = offset
+                    offset = RemoteScrollDrain.remaining(offset: offset, cellHeight: 18,
+                        velocity: sign * velocity, velocityAge: age, dt: 1.0 / 120)
+                    XCTAssertEqual(offset, previous * exp(-1.0 / 120 / 0.04), accuracy: 1e-10)
+                    XCTAssertGreaterThanOrEqual(offset * sign, 0)
+                    XCTAssertLessThan(abs(offset), abs(previous))
+                }
+            }
+            for velocity: CGFloat in [25, 72, 400, 3000, 100_000] {
+                for dt in [0.0, 1.0 / 120, 0.1, 2] {
+                    let offset = RemoteScrollDrain.remaining(offset: sign * 18, cellHeight: 18,
+                        velocity: sign * velocity, velocityAge: 0, gain: 4, dt: dt)
+                    XCTAssertGreaterThanOrEqual(offset * sign, 0)
+                    XCTAssertLessThanOrEqual(abs(offset), 18)
+                }
+            }
+        }
+    }
+
+    func testRemoteDrainSixRowBurstHasNoExtraSpikeAtRestOrModerateSpeed() {
+        for dt in [1.0 / 120, 1.0 / 60] {
+            let oldStep = 108 * (1 - exp(-dt / 0.04))
+            for speed: CGFloat in [0, 72, 400, 800] {
+                for age in [0.0, 0.05] {
+                    let remaining = RemoteScrollDrain.remaining(offset: 108, cellHeight: 18,
+                        velocity: speed, velocityAge: age, dt: dt)
+                    let step = 108 - remaining
+                    if speed == 0 || age >= 0.05 { XCTAssertEqual(step, oldStep, accuracy: 1e-10) }
+                    else { XCTAssertLessThanOrEqual(step, max(oldStep, 1.25 * speed * dt)) }
+                }
+            }
+        }
+    }
+
+    func testRemoteDrainFiltersNativeVelocityAndUsesOnlyRecentDistanceForGain() {
+        var drain = RemoteScrollDrain()
+        drain.begin(at: 0, time: 0)
+        drain.moved(to: 12, time: 0.03)
+        XCTAssertEqual(drain.velocity, 400 * (1 - exp(-1)), accuracy: 1e-8)
+        drain.arrived(rows: 2, cellHeight: 18, time: 0.03)
+        XCTAssertEqual(drain.gain(cellHeight: 18), 1, "Need at least three received rows")
+        drain.arrived(rows: 1, cellHeight: 18, time: 0.03)
+        XCTAssertEqual(drain.gain(cellHeight: 18), 4, "Gain is clamped")
+        drain.moved(to: 1012, time: 0.04)
+        XCTAssertEqual(drain.gain(cellHeight: 18), 0.25)
+        // Pruning on the drain's clock removes both numerator and denominator.
+        _ = drain.remaining(offset: 18, cellHeight: 18, time: 0.6, dt: 0)
+        XCTAssertEqual(drain.gain(cellHeight: 18), 1)
+        drain.begin(at: 0, time: 1)
+        drain.moved(to: 108, time: 1.1)
+        drain.arrived(rows: 3, cellHeight: 18, time: 1.1)
+        XCTAssertEqual(drain.gain(cellHeight: 18), 0.5)
+        drain.stop()
+        XCTAssertEqual(drain.velocity, 0)
+        XCTAssertEqual(drain.remaining(offset: 18, cellHeight: 18, time: 1.1, dt: 0.01),
+                       18 * exp(-0.01 / 0.04), accuracy: 1e-10)
+    }
+
+    func testRemoteNativeEndCallbacksReturnTheFollowerToExponentialSettle() throws {
+        for decelerating in [false, true] {
+            let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+            defer { model.stop(); canvas.cancelScrolling() }
+            canvas.screen = remotePaint(vt, offset: 0)
+            remoteWheel(canvas, rows: 3)
+            canvas.screen = remotePaint(vt, offset: 3)
+            canvas.scrollViewDidEndDragging(canvas.scrollView, willDecelerate: decelerating)
+            if decelerating { canvas.scrollViewDidEndDecelerating(canvas.scrollView) }
+            let offset = canvas.remoteOffset
+            canvas.advanceRemoteShift(by: 0.01)
+            XCTAssertEqual(canvas.remoteOffset, offset * exp(-0.01 / 0.04), accuracy: 1e-8)
+            assertRemoteDrainMatchesFreshCanvas(canvas)
         }
     }
 
@@ -770,9 +1005,16 @@ final class TerminalMotionTests: XCTestCase {
         model.receiveOutputForTesting(Data("\u{1b}[?2026h\u{1b}[Hpartial".utf8))
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertEqual(model.frame.text, before)
+        let framesBeforeWheel = model.renderedFrames
+        // A second wheel in the split DEC 2026 frame must not publish its partial rows.
+        move(canvas, to: canvas.scrollView.contentOffset.y - 18)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(model.frame.text, before)
+        XCTAssertEqual(model.renderedFrames, framesBeforeWheel)
         model.receiveOutputForTesting(Data("\u{1b}[Hcomplete\u{1b}[?2026l".utf8))
         for _ in 0..<100 where !model.frame.text.hasPrefix("complete") { await Task.yield() }
         XCTAssertTrue(model.frame.text.hasPrefix("complete"), "The completed response uses the same main-actor turn")
+        XCTAssertEqual(model.renderedFrames, framesBeforeWheel + 1)
 
         // The fast response is consumed once. Sustained unrelated output still batches
         // at the display cadence while the finger/physics remain active.
@@ -792,5 +1034,21 @@ final class TerminalMotionTests: XCTestCase {
         XCTAssertLessThanOrEqual(counts[1], counts[0] + 2)
         XCTAssertLessThan(counts[1], 30, "An active scroll must not unthrottle unrelated output")
         canvas.cancelScrolling()
+    }
+
+    func testAgedRemoteWheelHoldPublishesTheEscapeFrame() async throws {
+        for mouse in [false, true] {
+            let (_, model, canvas) = try fixture(mouse: mouse, alternate: true)
+            defer { model.stop(); canvas.cancelScrolling() }
+            remoteWheel(canvas, rows: 1)
+            model.receiveOutputForTesting(Data("\u{1b}[?2026h\u{1b}[Hparked".utf8))
+            try await Task.sleep(for: .milliseconds(120))
+            XCTAssertFalse(model.frame.text.hasPrefix("parked"))
+            let before = model.renderedFrames
+            move(canvas, to: canvas.scrollView.contentOffset.y + 18)
+            for _ in 0..<100 where !model.frame.text.hasPrefix("parked") { await Task.yield() }
+            XCTAssertTrue(model.frame.text.hasPrefix("parked"))
+            XCTAssertEqual(model.renderedFrames, before + 1)
+        }
     }
 }

@@ -363,7 +363,7 @@ final class TerminalScreenModel {
             scrolledBack = true
             return scheduleInteractionRender()
         }
-        let endedHold = vt.renderHoldRemaining != nil
+        let hadHold = vt.renderHoldRemaining != nil
         switch vt.wheel(lines: lines, column: column, row: row) {
         case .scrolledLocally:
             scrolledBack = true
@@ -373,7 +373,12 @@ final class TerminalScreenModel {
             send(data)
             // A remote wheel changes no local cells. Publish only when output arrives,
             // except when this interaction explicitly ended a synchronized-output hold.
-            if endedHold { scheduleInteractionRender() }
+            if hadHold, vt.renderHoldRemaining == nil {
+                #if DEBUG
+                TerminalScrollTrace.shared?.wheelEndedHold()
+                #endif
+                scheduleInteractionRender()
+            }
         }
     }
 

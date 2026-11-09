@@ -186,7 +186,7 @@ final class TerminalRenderingTests: XCTestCase {
         XCTAssertNil(vt.renderHoldRemaining)
     }
 
-    func testWheelReleasesHoldWithoutWaitingForRemoteOutput() throws {
+    func testWheelReleasesOnlyAgedHoldWithoutWaitingForRemoteOutput() async throws {
         for mode in ["\u{1B}[?1000h\u{1B}[?1006h", "\u{1B}[?1049h"] {
             let vt = try VirtualTerminal(cols: 20, rows: 5)
             vt.write(Data((mode + "before").utf8))
@@ -198,6 +198,14 @@ final class TerminalRenderingTests: XCTestCase {
                 return XCTFail("Mouse and alternate-screen wheel input goes to the program")
             }
             XCTAssertFalse(data.isEmpty)
+            XCTAssertNotNil(vt.renderHoldRemaining, "Fresh remote holds protect a partial frame")
+            XCTAssertTrue(vt.frame().lines[0].map(\.text).joined().hasPrefix("before"))
+            vt.write(Data("\rcomplete\u{1B}[?2026l".utf8))
+            XCTAssertNil(vt.renderHoldRemaining)
+            XCTAssertTrue(vt.frame().lines[0].map(\.text).joined().hasPrefix("complete"))
+            vt.write(Data("\r\u{1B}[?2026hafter".utf8))
+            try await Task.sleep(for: .milliseconds(120))
+            _ = vt.wheel(lines: -1, column: 1, row: 1)
             XCTAssertNil(vt.renderHoldRemaining)
             XCTAssertTrue(vt.frame().lines[0].map(\.text).joined().hasPrefix("after"))
         }

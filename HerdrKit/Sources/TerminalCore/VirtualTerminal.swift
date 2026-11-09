@@ -466,7 +466,11 @@ public final class VirtualTerminal {
     /// otherwise through our own scrollback.
     public func wheel(lines: Int, column: Int, row: Int) -> WheelResult {
         guard lines != 0 else { return .send(Data()) }
-        endRenderHold()
+        // A remote wheel changes no local cells: ending a fresh DEC 2026 hold exposes a
+        // torn frame (reverses this part of 8609605). Keep an escape for parked holds.
+        if let holdStarted, ProcessInfo.processInfo.systemUptime - holdStarted > 0.1 {
+            endRenderHold()
+        }
         if isMouseTracking {
             prepareMouse()
             ghostty_mouse_event_set_action(mouseEvent, GHOSTTY_MOUSE_ACTION_PRESS)

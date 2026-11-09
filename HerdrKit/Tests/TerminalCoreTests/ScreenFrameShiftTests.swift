@@ -29,6 +29,43 @@ private func shiftFixture(_ offset: Int = 0) -> ScreenFrame {
     #expect(new.shift(from: old, wheelSign: 1, wheelAge: 0)?.region == 1..<24)
 }
 
+@Test func comparesBlankCellsByAppearanceWithoutDiscardingVisibleStyle() {
+    for k in [1, -1] {
+        var old = shiftFixture()
+        var new = shiftFixture(k)
+        old.cols = 2
+        new.cols = 2
+        for y in old.lines.indices {
+            old.lines[y].append(ScreenCell(text: "", style: .plain, width: 1))
+            var ink = CellStyle.plain
+            ink.foreground = RGB(r: 255, g: 0, b: 0)
+            ink.bold = true
+            ink.italic = true
+            ink.faint = true
+            ink.invisible = true
+            new.lines[y].append(ScreenCell(text: " ", style: ink, width: 1))
+        }
+        #expect(new.shift(from: old, wheelSign: k, wheelAge: 0)?.region == 1..<24)
+        #expect(!old.lines[10].elementsEqual(new.lines[10 + k]))
+        for attribute in 0..<5 {
+            var visible = new
+            switch attribute {
+            case 0: visible.lines[12][1].style.background = RGB(r: 255, g: 0, b: 0)
+            case 1: visible.lines[12][1].style.underline = true
+            case 2: visible.lines[12][1].style.strikethrough = true
+            case 3: visible.lines[12][1].style.inverse = true
+            default: visible.lines[12][0].style.bold = true
+            }
+            #expect(!visible.rowLooksEqual(12, to: old, 12 + k))
+            #expect(visible.shift(from: old, wheelSign: k, wheelAge: 0)?.region != 1..<24)
+        }
+        var tail = ScreenCell(text: "", style: .plain, width: 0)
+        let original = tail
+        tail.style.faint = true
+        #expect(tail.shiftKey != original.shiftKey)
+    }
+}
+
 @Test func rejectsAmbiguousOrUnsafeShifts() {
     let old = shiftFixture()
     let shifted = shiftFixture(1)
