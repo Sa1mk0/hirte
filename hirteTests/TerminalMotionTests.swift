@@ -19,12 +19,12 @@ final class TerminalMotionTests: XCTestCase {
         return (vt, model, canvas)
     }
 
-    private func remotePaint(_ vt: VirtualTerminal, offset: Int) -> ScreenFrame {
+    private func remotePaint(_ vt: VirtualTerminal, offset: Int, chrome: Bool = true) -> ScreenFrame {
         var output = "\u{1b}[?25l\u{1b}[?2026h"
         for y in 0..<vt.rows {
             let text: String
-            if y == 0 { text = "header" }
-            else if y >= vt.rows - 2 { text = "fixed footer \(y)" }
+            if chrome && y == 0 { text = "header" }
+            else if chrome && y >= vt.rows - 2 { text = "fixed footer \(y)" }
             else { text = "item \(y + offset) ready 漢 e\u{301}" }
             output += "\u{1b}[\(y + 1);1H" + text + "\u{1b}[K"
         }
@@ -162,6 +162,22 @@ final class TerminalMotionTests: XCTestCase {
                 XCTAssertTrue(String(decoding: input[count], as: UTF8.self).hasPrefix("\u{1b}[<0;2;8M"))
             }
         }
+    }
+
+    /// A band that reaches the grid's edge must not inverse-map taps in the padding beyond it.
+    func testRemotePaddingTapKeepsThePhysicalRow() throws {
+        let (vt, model, canvas) = try fixture(mouse: true, alternate: true)
+        defer { model.stop() }
+        var input: [Data] = []
+        model.sentInputForTesting = { input.append($0) }
+        canvas.screen = remotePaint(vt, offset: 20, chrome: false)
+        remoteWheel(canvas, rows: -3)
+        canvas.screen = remotePaint(vt, offset: 17, chrome: false)
+        XCTAssertLessThan(canvas.remoteOffset, 0, "The band glides")
+        let count = input.count
+        canvas.handleTap(at: CGPoint(x: 20, y: 5))
+        XCTAssertGreaterThan(input.count, count)
+        XCTAssertTrue(String(decoding: input[count], as: UTF8.self).hasPrefix("\u{1b}[<0;2;1M"))
     }
 
     func testRemoteBandVisualsAtPhoneAndDuoSizes() throws {

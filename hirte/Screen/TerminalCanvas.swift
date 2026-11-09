@@ -696,8 +696,10 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// frame have no remote target: consume those taps rather than clamping onto fixed chrome.
     private func remoteTapCell(at point: CGPoint) -> (x: Int, y: Int)? {
         let physical = cell(at: point)
-        guard let region = remoteRegion, region.contains(physical.y) else { return physical }
         let g = geometry()
+        // The unclamped row: padding outside the grid is never part of the moving band.
+        let row = Int(floor((point.y - g.origin.y) / g.cellHeight))
+        guard let region = remoteRegion, region.contains(row) else { return physical }
         let y = Int(floor((point.y - g.origin.y - remoteOffset) / g.cellHeight))
         guard region.contains(y) else { return nil }
         return (physical.x, y)
