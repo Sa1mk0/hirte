@@ -194,7 +194,7 @@ final class LiveActivityUITests: XCTestCase {
                 XCTAssertTrue(apps.waitForExistence(timeout: 5))
                 Thread.sleep(forTimeInterval: 1)
                 apps.tap()
-                let hirte = settings.staticTexts["Hirte Dev"]
+                let hirte = settings.staticTexts["Hirte Preview Dev"]
                 XCTAssertTrue(hirte.waitForExistence(timeout: 5))
                 for _ in 0..<8 where !hirte.isHittable { settings.swipeUp() }
                 hirte.tap()
