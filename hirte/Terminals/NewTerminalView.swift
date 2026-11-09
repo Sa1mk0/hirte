@@ -5,7 +5,9 @@ import SwiftUI
 struct NewTerminalContext: Identifiable {
     var space: HerdrAppLayout.Space?
     var folder: String?
-    var id: String { space?.id ?? "none" }
+    /// Another machine added on this core, to start the terminal there.
+    var machine: String?
+    var id: String { space?.id ?? machine.map { "machine:\($0)" } ?? "none" }
 }
 
 /// Starts a shell, a command or an agent template on the machine.
@@ -189,6 +191,7 @@ struct NewTerminalView: View {
     private func load() async {
         folder = context.folder ?? ""
         if let space = context.space { placement = .space(space.id) }
+        if let machine = context.machine { self.machine = machine }
         do {
             templates = try await session.templates()
             if templates.isEmpty {
