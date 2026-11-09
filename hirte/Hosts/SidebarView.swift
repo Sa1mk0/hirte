@@ -60,7 +60,7 @@ struct SidebarView: View {
             Button("Add Machine…", systemImage: "plus") {
                 editing = Host.new(key: keys.keys.last?.id)
             }
-            if !hosts.hasDemo {
+            if hosts.offersDemo {
                 Button("Add Demo Machine", systemImage: "play.rectangle") {
                     selectedHost = hosts.addDemo().id
                 }
