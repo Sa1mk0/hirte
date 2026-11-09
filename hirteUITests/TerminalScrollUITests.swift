@@ -18,9 +18,7 @@ final class TerminalScrollUITests: XCTestCase {
             if let value = env[key], !value.isEmpty { app.launchEnvironment[key] = value }
         }
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier:
             env["HIRTE_COAST_REFERENCE"] == "1" ? "coast-reference" : "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
@@ -70,9 +68,7 @@ final class TerminalScrollUITests: XCTestCase {
             app.launchEnvironment["HIRTE_SCROLL_TUI_MS"] = delay
         }
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         let sidebar = app.collectionViews.firstMatch
@@ -96,6 +92,53 @@ final class TerminalScrollUITests: XCTestCase {
         }
     }
 
+    /// Holding the terminal has no action of its own: no menu, and a hold then a drag scrolls.
+    @MainActor
+    func testHoldingTheTerminalOnlyScrolls() throws {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let app = XCUIApplication()
+        let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "light"
+        app.launchArguments = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US",
+                               "-appearance", appearance, "-hirte.demo", "YES", "-hirte.demo.dense", "YES",
+                               "-terminal.watch", "NO", "-terminal.fontSize", "13"]
+        // Seeds t1 with sample history to scroll back into (DemoDenseScript).
+        app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
+        app.launch()
+        openRow("t1", in: app)
+        let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
+        XCTAssertTrue(screen.waitForExistence(timeout: 5))
+        let start = screen.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.3))
+        start.press(forDuration: 1)
+        XCTAssertFalse(app.menuItems.firstMatch.waitForExistence(timeout: 1))
+        let scrolledBack = app.staticTexts["Scrolled back. Tap to return to the live screen."]
+        XCTAssertFalse(scrolledBack.exists)
+        let held = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        held.name = "hold-plain-" + appearance
+        held.lifetime = .keepAlways
+        add(held)
+        // UIKit may take a still hold as an ordinary tap, which focuses: put the keyboard away.
+        let hint = app.buttons["Continue"]
+        if hint.waitForExistence(timeout: 1) { hint.tap() }
+        print("HOLD_PLAIN_FOCUSED=\(app.keyboards.firstMatch.exists)")
+        if app.keyboards.firstMatch.exists {
+            let hideKeyboard = app.buttons["Hide keyboard"]
+            XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5))
+            hideKeyboard.tap()
+            XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
+        }
+        start.press(forDuration: 0.8, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)),
+                    withVelocity: XCUIGestureVelocity(rawValue: 300), thenHoldForDuration: 0.3)
+        XCTAssertTrue(scrolledBack.waitForExistence(timeout: 3), "A hold then a drag scrolls the history")
+        XCTAssertFalse(app.menuItems.firstMatch.exists)
+        let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        attachment.name = "hold-" + appearance
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        if let folder = ProcessInfo.processInfo.environment["HIRTE_SHOTS"] {
+            try XCUIScreen.main.screenshot().pngRepresentation.write(to: URL(fileURLWithPath: folder).appendingPathComponent("hold-" + appearance + ".png"))
+        }
+    }
+
     @MainActor
     func testWatchPinchKeyboardAndEdgeDrag() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
@@ -106,9 +149,7 @@ final class TerminalScrollUITests: XCTestCase {
                                "-terminal.watch", "NO", "-terminal.fontSize", "13"]
         app.launchEnvironment["HIRTE_SCROLL_TRACE"] = "1"
         app.launch()
-        let first = app.descendants(matching: .any).matching(identifier: "t1").firstMatch
-        XCTAssertTrue(first.waitForExistence(timeout: 10))
-        first.tap()
+        openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
         // A vertical drag in the edge zone must still scroll; a horizontal drag hides the list.
@@ -139,5 +180,31 @@ final class TerminalScrollUITests: XCTestCase {
         hide.press(forDuration: 0.05, thenDragTo: hide.withOffset(CGVector(dx: -150, dy: 0)),
                    withVelocity: XCUIGestureVelocity(rawValue: 500), thenHoldForDuration: 0)
         XCTAssertFalse(app.buttons["Agents"].isHittable, "The horizontal edge swipe still hides the sidebar")
+    }
+
+    /// Scrolls the list until the row is wholly between its title and the bar over its end, then
+    /// taps it. On a phone or the Duo it can start under that bar, or below the list's end, where
+    /// it doesn't exist yet.
+    @MainActor
+    private func openRow(_ address: String, in app: XCUIApplication) {
+        let list = app.collectionViews.firstMatch
+        let anyRow = app.descendants(matching: .any).matching(NSPredicate(format: "identifier MATCHES 't[0-9]+'")).firstMatch
+        XCTAssertTrue(anyRow.waitForExistence(timeout: 10), "The demo's terminals are listed")
+        let row = app.descendants(matching: .any).matching(identifier: address).firstMatch
+        // A row that doesn't exist has an empty frame: check that it exists first.
+        func inView() -> Bool {
+            row.exists && row.frame.minY >= app.sidebarTitleBottom && row.frame.maxY <= app.modeBarTop
+        }
+        for _ in 0..<6 {
+            if inView() { break }
+            let up = !row.exists || row.frame.maxY > app.modeBarTop
+            let start = list.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.65 : 0.35))
+            start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: up ? -120 : 120)),
+                        withVelocity: XCUIGestureVelocity(rawValue: 160), thenHoldForDuration: 0.3)
+        }
+        XCTAssertTrue(row.exists, "\(address) is listed")
+        XCTAssertTrue(inView(), "\(address) is between the list's title and the bar over its end: \(row.frame)")
+        XCTAssertTrue(row.isHittable)
+        row.tap()
     }
 }

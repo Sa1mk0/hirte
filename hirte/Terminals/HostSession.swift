@@ -95,8 +95,8 @@ final class HostSession {
         try await connectedClient().run(request)
     }
 
-    func templates() async -> [TemplateInfo] {
-        (try? await connectedClient().templates()) ?? []
+    func templates() async throws -> [TemplateInfo] {
+        try await connectedClient().templates()
     }
 
     func label(_ address: String, _ labels: [String: String]) async throws {

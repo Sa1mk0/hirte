@@ -521,8 +521,18 @@ struct TerminalListView: View {
             }
             if !session.machines.isEmpty {
                 Section("Machines added on \(session.coreName ?? "this core")") {
+                    // Not terminals: without their own tag, the list's selection would take the
+                    // machine's name as a terminal address and attach to nothing.
                     ForEach(session.machines) { machine in
-                        LabeledContent(machine.name, value: machine.state)
+                        Button {
+                            newTerminal = NewTerminalContext(machine: machine.name)
+                        } label: {
+                            LabeledContent(machine.name, value: machine.state)
+                        }
+                        .disabled(machine.state != "connected" || session.state != .connected)
+                        .tag(String?.none)
+                        .selectionDisabled()
+                        .accessibilityIdentifier("machine-\(machine.name)")
                     }
                 }
             }

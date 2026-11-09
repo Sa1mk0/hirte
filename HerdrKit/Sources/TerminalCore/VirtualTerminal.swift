@@ -154,7 +154,7 @@ public final class VirtualTerminal {
         try check(ghostty_render_state_new(nil, &renderState), "render_state_new")
         // Pinned libghostty-vt overscan captures real cells without moving the viewport or PTY.
         var overscan = GhosttyRenderStateOverscan(above: 0, below: 1)
-        try check(ghostty_render_state_set(renderState, GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &overscan), "render_state_overscan")
+        try check(ghostty_render_state_set(renderState, GHOSTTY_RENDER_STATE_OPT_OVERSCAN, &overscan), "render_state_overscan")
         try check(ghostty_render_state_row_iterator_new(nil, &rowIterator), "row_iterator_new")
         try check(ghostty_render_state_row_cells_new(nil, &rowCells), "row_cells_new")
         try check(ghostty_key_encoder_new(nil, &keyEncoder), "key_encoder_new")
@@ -469,7 +469,11 @@ public final class VirtualTerminal {
     /// otherwise through our own scrollback.
     public func wheel(lines: Int, column: Int, row: Int) -> WheelResult {
         guard lines != 0 else { return .send(Data()) }
-        endRenderHold()
+        // A remote wheel changes no local cells: ending a fresh DEC 2026 hold exposes a
+        // torn frame (reverses this part of 8609605). Keep an escape for parked holds.
+        if let holdStarted, ProcessInfo.processInfo.systemUptime - holdStarted > 0.1 {
+            endRenderHold()
+        }
         if isMouseTracking {
             prepareMouse()
             ghostty_mouse_event_set_action(mouseEvent, GHOSTTY_MOUSE_ACTION_PRESS)

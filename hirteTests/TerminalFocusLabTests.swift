@@ -55,6 +55,22 @@ final class TerminalFocusLabTests: XCTestCase {
         }
     }
 
+    func testTerminalHoldIsGoneButSpaceBarTrackpadSendsArrows() throws {
+        let (canvas, model, _, window) = try canvas(mouse: false)
+        defer { model.stop(); window.isHidden = true }
+        // Only the canvas's own recognizer: UIScrollView and the edit menu's secondary click bring theirs.
+        XCTAssertFalse((canvas.gestureRecognizers ?? []).contains { type(of: $0) == UILongPressGestureRecognizer.self },
+                       "Holding the terminal has no action of its own")
+        var input: [Data] = []
+        model.sentInputForTesting = { input.append($0) }
+        canvas.beginFloatingCursor(at: CGPoint(x: 100, y: 100))
+        XCTAssertTrue(canvas.subviews.contains { $0 is ArrowPadView })
+        canvas.updateFloatingCursor(at: CGPoint(x: 140, y: 100))
+        canvas.endFloatingCursor()
+        XCTAssertEqual(input, [Data("\u{1b}[C".utf8)])
+        XCTAssertFalse(canvas.subviews.contains { $0 is ArrowPadView })
+    }
+
     func testLinkTapRemainsALinkActionWhileWatching() throws {
         let terminal = try VirtualTerminal(cols: 40, rows: 10)
         terminal.write(Data("https://example.com".utf8))

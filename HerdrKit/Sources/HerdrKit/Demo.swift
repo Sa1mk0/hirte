@@ -53,6 +53,9 @@ private actor DemoEngine {
     /// Opt-in generic mouse TUI for continuous UI gestures; no real host or network involved.
     private let scrollLabDelay = ProcessInfo.processInfo.environment["HIRTE_SCROLL_TUI_MS"].flatMap(Double.init)
     private var scrollLabTrace: FileHandle?
+    /// Opt-in template-run outcomes for UI tests: `unsent` (the terminal starts, its first
+    /// message doesn't go in) or `slow` (the reply comes after a long wait).
+    private let firstMessageLab = ProcessInfo.processInfo.environment["HIRTE_DEMO_FIRST_MESSAGE"]
     #endif
 
     /// One attached viewer.
@@ -138,6 +141,23 @@ private actor DemoEngine {
               let method = object["method"] as? String else { return }
         let id = object["id"] as? Int
         let params = object["params"] as? [String: Any] ?? [:]
+        #if DEBUG
+        if method == "terminal.run", firstMessageLab == "slow", let id {
+            // Like a core waiting for its agent: the terminal exists now, the reply comes later.
+            do {
+                let terminal = try encode(run(params))
+                Task {
+                    try? await Task.sleep(for: .seconds(8))
+                    reply(id: id, result: terminal)
+                }
+            } catch let error as DemoError {
+                reply(id: id, error: error)
+            } catch {
+                reply(id: id, error: DemoError(code: -32603, message: "\(error)", kind: nil))
+            }
+            return
+        }
+        #endif
         do {
             let (result, after) = try answer(method, params)
             if let id { reply(id: id, result: result) }
@@ -243,6 +263,14 @@ private actor DemoEngine {
             // A template or command: show it as a fresh agent that waits for its first turn.
             terminal.argv = argv
             terminal.status = .init(state: "idle", app: "agent", title: first, msg: argv.dropFirst().joined(separator: " "))
+            if DemoScript.templateNames.contains(first) {
+                terminal.firstMessage = DemoFirstMessage(sent: true, started: true, turn: 0)
+                #if DEBUG
+                if firstMessageLab == "unsent" {
+                    terminal.firstMessage = DemoFirstMessage(sent: false, reason: "the agent was not ready in time")
+                }
+                #endif
+            }
             terminal.statusMs = DemoScript.now
             terminal.foreground = nil
             roles[address] = .agent(DemoScript.newAgentPaint(task: argv.dropFirst().joined(separator: " ")))
@@ -398,7 +426,9 @@ private actor DemoEngine {
     private func scrollLabPaint(_ channel: UInt32, offset: Int) -> String {
         let rows = terminals.first { $0.address == views[channel]?.address }?.rows ?? 24
         return "\u{1b}[?2026h\u{1b}[H" + (0..<rows).map {
-            "\u{1b}[\($0 + 1);1Hitem \(offset + $0) ready 漢 e\u{301}\u{1b}[K"
+            "\u{1b}[\($0 + 1);1H" + ($0 < rows - 2
+                ? "item \(offset + $0) ready 漢 e\u{301}"
+                : ($0 == rows - 2 ? "Composer: type a message" : "Status: connected")) + "\u{1b}[K"
         }.joined() + "\u{1b}[?2026l"
     }
 
@@ -602,6 +632,7 @@ struct DemoTerminal: Encodable, Sendable {
     var parent: String?
     var turn: UInt64 = 0
     var statusMs: UInt64?
+    var firstMessage: DemoFirstMessage?
 
     init(address: String, name: String? = nil, argv: [String], cwd: String, state: String = "live",
          title: String? = nil, status: DemoStatus? = nil, labels: [String: String] = [:],
@@ -629,7 +660,15 @@ struct DemoTerminal: Encodable, Sendable {
         case createdMs = "created_ms"
         case exitCode = "exit_code"
         case statusMs = "status_ms"
+        case firstMessage = "first_message"
     }
+}
+
+struct DemoFirstMessage: Encodable, Sendable {
+    var sent: Bool
+    var reason: String?
+    var started: Bool?
+    var turn: UInt64?
 }
 
 private struct Hello: Encodable {

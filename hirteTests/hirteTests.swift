@@ -49,7 +49,10 @@ struct HostTests {
         defer { defaults.removePersistentDomain(forName: suite) }
 
         let store = HostStore(defaults: defaults)
+        #expect(store.offersDemo)
         store.save(Host(name: "Mini", target: SSHTarget(host: "mini.local", username: "pavel")))
+        // An own machine moves the demo out of the add menus (Settings keeps it).
+        #expect(!store.offersDemo)
         let demo = store.addDemo()
         #expect(store.addDemo().id == demo.id)
 

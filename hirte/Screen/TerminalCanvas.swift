@@ -13,7 +13,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             // A new model (after a reconnect) needs the grid size to attach.
             lastGrid = nil
             setNeedsLayout()
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
     }
     var screen: ScreenFrame = .empty {
@@ -21,7 +21,9 @@ final class TerminalCanvasView: UIView, UITextInput {
             // What shows before (and around) the drawn cells: the screen's own background.
             if screen.background != oldValue.background { backgroundColor = UIColor(screen.background) }
             synchronizeScrolling()
+            presentRemoteShift(from: oldValue)
             invalidate(from: oldValue)
+            layoutContent()
             #if DEBUG
             TerminalScrollTrace.shared?.record("canvas", offset: CGFloat(screen.scrollbar?.offset ?? 0))
             #endif
@@ -35,7 +37,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             // At once: until the new grid reaches the emulator, the old columns don't fit the
             // new font and `geometry()` would shrink it back, which looks like a jump.
             reportGridSize(force: true, immediately: true)
-            setNeedsDisplay()
+            redrawContent()
         }
     }
     var fontFamily: TerminalFont = .jetBrainsMono {
@@ -45,7 +47,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             fonts = Fonts(size: fontSize, family: fontFamily)
             scaledFonts = nil
             reportGridSize(force: true, immediately: true)
-            setNeedsDisplay()
+            redrawContent()
         }
     }
     /// Cells that fit at the current font size; reported when they change.
@@ -93,15 +95,15 @@ final class TerminalCanvasView: UIView, UITextInput {
             return fingerprint == other.fingerprint && cells == other.cells
         }
     }
-    /// Where the current hold began, while holding (see `ArrowStick`).
+    /// Where the current hold of the space bar's trackpad began (see `ArrowStick`).
     private var stickOrigin: CGPoint?
-    /// The arrow key the held finger points to; nil inside the dead zone.
+    /// The arrow key the trackpad points to; nil inside the dead zone.
     private var stickKey: TerminalKey?
     private var stickSpeed: ArrowStick.Speed = .slow
     /// Whether the key repeats yet (it waits `ArrowStick.repeatDelay` after the first).
     private var stickRepeating = false
     private var stickTimer: Timer?
-    /// Keys sent during this hold; none means it was a plain hold, which offers Paste.
+    /// Keys sent during this hold, to move the arrow pad's lit chevrons along.
     private var stickSent = 0
     private lazy var arrowPad = ArrowPadView()
     /// Text an input method is still composing (see `setMarkedText`); typed once it's done.
@@ -118,7 +120,25 @@ final class TerminalCanvasView: UIView, UITextInput {
     // UIKit owns gesture tracking and time-based deceleration. The canvas stays fixed;
     // only a viewport of cells (plus one real overscan row) is ever materialized.
     let scrollView = UIScrollView()
-    private(set) var scrollFraction: CGFloat = 0
+    /// The painted rows (see `TerminalContentView`). A fractional scroll moves them with a layer
+    /// transform of `contentClip`: no CPU repaint of unchanged rows, and no UIView geometry change.
+    let contentView = TerminalContentView()
+    private let contentClip = UIView()
+    private let remoteClip = UIView()
+    private let remoteContent = TerminalContentView()
+    private(set) var remoteRegion: Swift.Range<Int>?
+    private(set) var remoteStrip: [[ScreenCell]] = []
+    private(set) var remoteOffset: CGFloat = 0
+    private var remoteDirection = 0
+    private var lastWheelSign = 0
+    private var lastWheelTimes: [Int: CFTimeInterval] = [:]
+    private var remoteDrain = RemoteScrollDrain()
+    private var remoteLink: CADisplayLink?
+    private var remoteTickTime: CFTimeInterval = 0
+    private let scrollThumb = UIView()
+    private(set) var scrollFraction: CGFloat = 0 {
+        didSet { if scrollFraction != oldValue { layoutContent() } }
+    }
     private var applyingScroll = false
     // History indices can rebase while output prunes. UIKit's in-flight coordinate and
     // velocity stay untouched; this origin maps them to the current terminal history.
@@ -161,12 +181,22 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// Watching: the terminal's size is another viewer's. It's fitted to the view as a whole
     /// (larger or smaller than our font).
     var watching = false {
-        didSet { if watching != oldValue { setNeedsDisplay() } }
+        didSet {
+            if watching != oldValue {
+                if remoteOffset != 0 { snapRemoteShift() }
+                redrawContent()
+            }
+        }
     }
     /// For a quick look (the list's long-press preview): the font as set, never shrunk to fit;
     /// what doesn't fit is cut off on the right and above the cursor row.
     var cropped = false {
-        didSet { if cropped != oldValue { setNeedsDisplay() } }
+        didSet {
+            if cropped != oldValue {
+                if remoteOffset != 0 { snapRemoteShift() }
+                redrawContent()
+            }
+        }
     }
     /// A sideways swipe that starts in our left part, for showing or hiding the lists beside us
     /// (see `onEdgeSwipe`). Not a `UIScreenEdgePanGestureRecognizer`: with the lists showing, our
@@ -208,13 +238,33 @@ final class TerminalCanvasView: UIView, UITextInput {
     override init(frame: CGRect) {
         super.init(frame: frame)
         isOpaque = true
-        // Never scale the drawn screen: when the keyboard or a fold animates our frame,
-        // Core Animation would stretch the old bitmap to the new size until the redraw
-        // lands, which looks like the font jumping. Pin it to the top-left and clip.
-        contentMode = .topLeft
-        layer.contentsGravity = .topLeft
         clipsToBounds = true
         backgroundColor = UIColor(screen.background)
+        // Never scale the drawn screen: when the keyboard or a fold animates our frame,
+        // Core Animation would stretch the old bitmap to the new size until the redraw
+        // lands, which looks like the font jumping. Pin it to the top-left.
+        contentView.canvas = self
+        contentView.isOpaque = true
+        contentView.contentMode = .topLeft
+        contentView.layer.contentsGravity = .topLeft
+        contentView.isUserInteractionEnabled = false
+        contentClip.isUserInteractionEnabled = false
+        contentClip.addSubview(contentView)
+        addSubview(contentClip)
+        remoteContent.canvas = self
+        remoteContent.isRemoteBand = true
+        remoteContent.isOpaque = true
+        remoteContent.contentMode = .topLeft
+        remoteContent.layer.contentsGravity = .topLeft
+        remoteContent.isUserInteractionEnabled = false
+        remoteClip.isUserInteractionEnabled = false
+        remoteClip.clipsToBounds = true
+        remoteClip.isHidden = true
+        remoteClip.addSubview(remoteContent)
+        addSubview(remoteClip)
+        scrollThumb.isUserInteractionEnabled = false
+        scrollThumb.isHidden = true
+        addSubview(scrollThumb)
         // For UI tests and VoiceOver users: the terminal as one element.
         isAccessibilityElement = true
         accessibilityLabel = "Terminal"
@@ -242,9 +292,6 @@ final class TerminalCanvasView: UIView, UITextInput {
         pan.addTarget(self, action: #selector(panned))
         self.pan = pan
         addGestureRecognizer(edgeSwipe)
-        let press = UILongPressGestureRecognizer(target: self, action: #selector(longPressed))
-        press.minimumPressDuration = 0.35
-        addGestureRecognizer(press)
         addInteraction(editMenu)
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(keyboardWillChange(_:)),
@@ -269,7 +316,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         cancelScrolling()
         keyboardInset = inset
         synchronizeScrolling()
-        setNeedsDisplay()
+        redrawContent()
         reportGridSize(force: false, immediately: true)
     }
 
@@ -281,11 +328,112 @@ final class TerminalCanvasView: UIView, UITextInput {
         super.layoutSubviews()
         #if DEBUG
         TerminalScrollTrace.shared?.attach(self)
+        TerminalScrollTrace.shared?.record("layout")
         #endif
         synchronizeScrolling()
         reportGridSize(force: false)
-        setNeedsDisplay()
+        // Repaints only when the painted area changes size (`layoutContent`), never per layout pass.
+        layoutContent()
     }
+
+    /// UIKit gives a view that draws (the content view) its screen's scale; the canvas itself
+    /// no longer draws, so its scale is the content's. Setting it (tests) sets both.
+    override var contentScaleFactor: CGFloat {
+        get { contentView.contentScaleFactor }
+        set {
+            super.contentScaleFactor = newValue
+            contentView.contentScaleFactor = newValue
+            remoteContent.contentScaleFactor = newValue
+        }
+    }
+
+    private func redrawContent() {
+        layoutContent()
+        contentView.setNeedsDisplay()
+    }
+
+    /// Places the painted rows: a pure fraction moves them, it never repaints them. The rows'
+    /// window (and its real overscan row below) is clipped only while history shows one.
+    /// The rows' clip keeps its bounds while scrolling: changing them (or a subview layer's
+    /// transform) makes UIKit lay out the canvas again on every native callback. The fraction is
+    /// the clip layer's `sublayerTransform` instead; the scrollbar's frame origin is harmless.
+    private func layoutContent() {
+        let g = geometry()
+        let window = CGRect(x: 0, y: g.origin.y, width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight)
+        let thumb = scrollbarThumb(screen.scrollbar)
+        // Keyboard notifications and SwiftUI updates can arrive inside animation blocks.
+        UIView.performWithoutAnimation {
+            if contentClip.frame != window { contentClip.frame = window }
+            let origin = CGPoint(x: 0, y: window.minY)
+            if contentClip.bounds.origin != origin { contentClip.bounds.origin = origin }
+            if contentClip.clipsToBounds != (screen.lineBelow != nil) { contentClip.clipsToBounds = screen.lineBelow != nil }
+            let size = CGSize(width: bounds.width, height: bounds.height + g.cellHeight)
+            if contentView.frame != CGRect(origin: .zero, size: size) {
+                contentView.frame = CGRect(origin: .zero, size: size)
+                contentView.setNeedsDisplay()
+            }
+            if scrollThumb.isHidden != (thumb == nil || pinchSnapshot != nil) {
+                scrollThumb.isHidden = thumb == nil || pinchSnapshot != nil
+            }
+            if let thumb {
+                // Its frame, not a transform: a UIView layer's transform lays out the canvas again.
+                if scrollThumb.frame != thumb {
+                    scrollThumb.frame = thumb
+                    scrollThumb.layer.cornerRadius = thumb.width / 2
+                }
+                let color = UIColor(screen.foreground).withAlphaComponent(0.45)
+                if scrollThumb.backgroundColor != color { scrollThumb.backgroundColor = color }
+            }
+        }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let shift = CATransform3DMakeTranslation(0, -scrollFraction, 0)
+        if !CATransform3DEqualToTransform(contentClip.layer.sublayerTransform, shift) {
+            contentClip.layer.sublayerTransform = shift
+        }
+        if let region = remoteRegion {
+            let top = g.origin.y + CGFloat(region.lowerBound) * g.cellHeight
+            let band = CGRect(x: 0, y: top, width: bounds.width, height: CGFloat(region.count) * g.cellHeight)
+            if remoteClip.frame != band { remoteClip.frame = band }
+            let leaving = remoteDirection > 0 ? remoteStrip.count - region.count : 0
+            let strip = CGRect(x: 0, y: -CGFloat(leaving) * g.cellHeight,
+                               width: bounds.width, height: CGFloat(remoteStrip.count) * g.cellHeight)
+            if remoteContent.frame != strip { remoteContent.frame = strip }
+            remoteClip.layer.sublayerTransform = CATransform3DMakeTranslation(0, remoteOffset, 0)
+        }
+        CATransaction.commit()
+        #if DEBUG
+        if presentedFraction != scrollFraction || presentedRow != screen.scrollbar?.offset {
+            presentedFraction = scrollFraction
+            presentedRow = screen.scrollbar?.offset
+            contentMoves += 1
+            TerminalScrollTrace.shared?.record("present", state: scrollView.isDecelerating ? 4 : 0,
+                offset: CGFloat(screen.scrollbar?.offset ?? 0) * g.cellHeight + scrollFraction, height: g.cellHeight)
+        }
+        #endif
+    }
+
+    #if DEBUG
+    private var presentedFraction: CGFloat = 0
+    private var presentedRow: Int?
+    /// Lab diagnostics: position changes of the painted rows (movement, not CPU drawing).
+    private(set) var contentMoves = 0
+    /// Lab diagnostics: CPU draws of the painted rows.
+    private(set) var contentDraws = 0
+
+    /// The CPU drawing path alone, into the current context (benchmarks, cache labs).
+    func drawForTesting(_ rect: CGRect) { drawContent(rect) }
+
+    /// What the screen shows: the composited layers, after any pending paint (all rows again
+    /// with `repaint`, e.g. to compare a cache hit with a fresh canvas).
+    func renderForTesting(in context: CGContext, repaint: Bool = true) {
+        layoutIfNeeded()
+        if repaint { contentView.setNeedsDisplay() }
+        contentView.layer.displayIfNeeded()
+        remoteContent.layer.displayIfNeeded()
+        layer.render(in: context)
+    }
+    #endif
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -361,7 +509,7 @@ final class TerminalCanvasView: UIView, UITextInput {
            let row = screen.cursor?.y ?? screen.cursorRow, row >= visibleRows {
             origin.y -= CGFloat(row - visibleRows + 1) * drawFonts.cellHeight
         }
-        origin.y -= scrollFraction
+        // Rows are painted without the scroll fraction; `layoutContent` moves them by it.
         return Geometry(origin: origin, fonts: drawFonts)
     }
 
@@ -369,7 +517,7 @@ final class TerminalCanvasView: UIView, UITextInput {
     func cell(at point: CGPoint) -> (x: Int, y: Int) {
         let g = geometry()
         let x = Int((point.x - g.origin.x) / g.cellWidth)
-        let y = Int(floor((point.y - g.origin.y) / g.cellHeight))
+        let y = Int(floor((point.y + scrollFraction - g.origin.y) / g.cellHeight))
         let lastRow = screen.rows - 1 + (scrollFraction > 0 && screen.lineBelow != nil ? 1 : 0)
         return (min(max(x, 0), max(screen.cols - 1, 0)), min(max(y, 0), max(lastRow, 0)))
     }
@@ -379,37 +527,37 @@ final class TerminalCanvasView: UIView, UITextInput {
             .insetBy(dx: 0, dy: -1)
     }
 
-    /// Redraws only lines whose cells, selection or cursor changed.
+    /// Redraws only lines whose cells, selection or cursor changed (the scrollbar is a view).
     private func invalidate(from old: ScreenFrame) {
         guard old.cols == screen.cols, old.rows == screen.rows, old.lines.count == screen.lines.count,
               old.background == screen.background, old.foreground == screen.foreground
         else {
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
             return
         }
         let g = geometry()
         if old.lineBelow != screen.lineBelow || old.selectionBelow != screen.selectionBelow {
-            setNeedsDisplay(lineRect(screen.rows, g))
+            contentView.setNeedsDisplay(lineRect(screen.rows, g))
         }
         for y in screen.lines.indices
         where old.lines[y] != screen.lines[y]
             || (old.selection.indices.contains(y) ? old.selection[y] : nil)
                 != (screen.selection.indices.contains(y) ? screen.selection[y] : nil)
         {
-            setNeedsDisplay(lineRect(y, g))
-        }
-        if old.scrollbar != screen.scrollbar, scrollbarThumb(old.scrollbar) != nil || scrollbarThumb(screen.scrollbar) != nil {
-            setNeedsDisplay(CGRect(x: bounds.maxX - 12, y: 0, width: 12, height: bounds.height))
+            contentView.setNeedsDisplay(lineRect(y, g))
         }
         if old.cursor != screen.cursor {
-            if let y = old.cursor?.y { setNeedsDisplay(lineRect(y, g)) }
-            if let y = screen.cursor?.y { setNeedsDisplay(lineRect(y, g)) }
+            if let y = old.cursor?.y { contentView.setNeedsDisplay(lineRect(y, g)) }
+            if let y = screen.cursor?.y { contentView.setNeedsDisplay(lineRect(y, g)) }
         }
     }
 
-    override func draw(_ rect: CGRect) {
+    /// Paints rows in content coordinates (the canvas's, before the scroll fraction), including
+    /// the real overscan row below whenever history has one, so a fraction never needs it drawn.
+    fileprivate func drawContent(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext() else { return }
         #if DEBUG
+        contentDraws += 1
         TerminalScrollTrace.shared?.record("draw-start", state: scrollView.isDecelerating ? 4 : 0,
             offset: CGFloat(screen.scrollbar?.offset ?? 0) * geometry().cellHeight + scrollFraction)
         defer {
@@ -424,35 +572,218 @@ final class TerminalCanvasView: UIView, UITextInput {
         guard pinchSnapshot == nil, screen.cols > 0, !screen.lines.isEmpty else { return }
 
         let g = geometry()
-        let highlight = UIColor.tintColor.withAlphaComponent(0.4)
         context.saveGState()
-        if scrollFraction != 0 {
-            context.clip(to: CGRect(x: 0, y: g.origin.y + scrollFraction,
-                                    width: bounds.width, height: CGFloat(screen.rows) * g.cellHeight))
-        }
-        let rowCount = screen.lines.count + (scrollFraction != 0 && screen.lineBelow != nil ? 1 : 0)
+        let rowCount = screen.lines.count + (screen.lineBelow != nil ? 1 : 0)
         for y in 0..<rowCount {
             let line = y < screen.lines.count ? screen.lines[y] : screen.lineBelow!
             let top = g.origin.y + CGFloat(y) * g.cellHeight
             guard top < rect.maxY, top + g.cellHeight > rect.minY else { continue }
-            drawBackgrounds(line, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, in: context)
             let selection = y < screen.selection.count ? screen.selection[y] : screen.selectionBelow
-            if let selected = selection {
-                highlight.setFill()
-                context.fill(CGRect(
-                    x: g.origin.x + CGFloat(selected.lowerBound) * g.cellWidth, y: top,
-                    width: CGFloat(selected.count) * g.cellWidth, height: g.cellHeight))
-            }
-            drawCachedText(line, top: top, geometry: g)
+            drawRow(line, selection: selection, top: top, geometry: g, in: context)
         }
         if let cursor = screen.cursor, cursor.y < rowCount {
             drawCursor(cursor, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, fonts: g.fonts, in: context)
         }
         context.restoreGState()
-        if let thumb = scrollbarThumb(screen.scrollbar) {
-            UIColor(screen.foreground).withAlphaComponent(0.45).setFill()
-            UIBezierPath(roundedRect: thumb, cornerRadius: thumb.width / 2).fill()
+    }
+
+    /// Both the authoritative viewport and retained strip use this painter and text cache.
+    private func drawRow(_ line: [ScreenCell], selection: ClosedRange<Int>?, top: CGFloat,
+                         geometry g: Geometry, in context: CGContext) {
+        drawBackgrounds(line, top: top, origin: g.origin, cellWidth: g.cellWidth, cellHeight: g.cellHeight, in: context)
+        if let selected = selection {
+            UIColor.tintColor.withAlphaComponent(0.4).setFill()
+            context.fill(CGRect(x: g.origin.x + CGFloat(selected.lowerBound) * g.cellWidth, y: top,
+                                width: CGFloat(selected.count) * g.cellWidth, height: g.cellHeight))
         }
+        drawCachedText(line, top: top, geometry: g)
+    }
+
+    fileprivate func drawRemoteBand(_ rect: CGRect) {
+        guard let context = UIGraphicsGetCurrentContext() else { return }
+        UIColor(screen.background).setFill()
+        context.fill(rect)
+        let g = geometry()
+        for (y, line) in remoteStrip.enumerated() {
+            let top = CGFloat(y) * g.cellHeight
+            guard top < rect.maxY, top + g.cellHeight > rect.minY else { continue }
+            drawRow(line, selection: nil, top: top, geometry: g, in: context)
+        }
+    }
+
+    private func presentRemoteShift(from old: ScreenFrame) {
+        guard configuredRoute == .remote, !watching, !cropped,
+              old.cols == screen.cols, old.rows == screen.rows,
+              old.lines.count == screen.lines.count,
+              old.foreground == screen.foreground, old.background == screen.background
+        else { snapRemoteShift(reason: "presentation"); return }
+        if let region = remoteRegion {
+            let unchanged = region.allSatisfy { y in
+                screen.rowLooksEqual(y, to: old, y)
+                    && (old.selection.indices.contains(y) ? old.selection[y] : nil)
+                        == (screen.selection.indices.contains(y) ? screen.selection[y] : nil)
+            }
+            let cursorInside = [old.cursor, screen.cursor].contains { $0.map { region.contains($0.y) } ?? false }
+            if unchanged && !cursorInside { return }
+        }
+        let now = CACurrentMediaTime()
+        var detected = screen.shift(from: old, wheelSign: lastWheelSign,
+                                    wheelAge: now - (lastWheelTimes[lastWheelSign] ?? 0))
+        // Replies from before a reversal can still be in flight. Try that input's sign
+        // once, under the same age/evidence rules; never predict a response.
+        if detected == nil, let previous = lastWheelTimes[-lastWheelSign] {
+            detected = screen.shift(from: old, wheelSign: -lastWheelSign, wheelAge: now - previous)
+        }
+        guard let shift = detected else {
+            if let trimmed = remoteBandTrimmedPastChangedEdges(from: old) {
+                let leaving = remoteLeavingRows(for: trimmed, rows: 0, direction: remoteDirection, from: old)
+                let band = Array(screen.lines[trimmed])
+                remoteStrip = remoteDirection > 0 ? leaving + band : band + leaving
+                remoteRegion = trimmed
+                remoteContent.setNeedsDisplay()
+                return
+            }
+            snapRemoteShift(reason: "unverified-frame")
+            return
+        }
+        let direction = shift.rows > 0 ? 1 : -1
+        var target = shift.region
+        if let region = remoteRegion {
+            let edgeDelta = abs(region.lowerBound - shift.region.lowerBound)
+                + abs(region.upperBound - shift.region.upperBound)
+            if direction == remoteDirection, shift.region.lowerBound >= region.lowerBound,
+               shift.region.upperBound <= region.upperBound, keepsRemoteBand(region, rows: shift.rows, from: old) {
+                // Bunched rows can make blank edge rows look unchanged; the established band
+                // still follows this shift row by row, so keep it rather than restart.
+                target = region
+            } else if direction != remoteDirection || edgeDelta > 2 {
+                snapRemoteShift(reason: direction != remoteDirection ? "direction-change" : "band-change")
+            }
+        }
+        let height = geometry().cellHeight
+        remoteDrain.arrived(rows: shift.rows, cellHeight: height, time: now)
+        let offset = remoteOffset + CGFloat(shift.rows) * height
+        guard abs(offset) <= CGFloat(min(12, target.count / 2)) * height else {
+            snapRemoteShift(reason: "backlog-limit")
+            return
+        }
+        let leaving = remoteLeavingRows(for: target, rows: shift.rows, direction: direction, from: old)
+        let band = Array(screen.lines[target])
+        remoteStrip = direction > 0 ? leaving + band : band + leaving
+        // Retain only rows that can still be exposed by the residual, plus two for a band
+        // edge that moves next frame. This bounds memory across a long fling.
+        let count = target.count + Int(ceil(abs(offset) / height)) + 2
+        if remoteStrip.count > count {
+            remoteStrip = direction > 0 ? Array(remoteStrip.suffix(count)) : Array(remoteStrip.prefix(count))
+        }
+        remoteRegion = target
+        remoteDirection = direction
+        remoteOffset = offset
+        // Rows the strip cannot supply show the terminal background, never the frame below.
+        remoteClip.backgroundColor = UIColor(screen.background)
+        remoteClip.isHidden = false
+        remoteContent.setNeedsDisplay()
+        if remoteLink == nil {
+            let tick = TerminalRemoteTick()
+            tick.fire = { [weak self] link in
+                guard let self else { link.invalidate(); return }
+                let dt = max(0, link.timestamp - self.remoteTickTime)
+                self.remoteTickTime = link.timestamp
+                self.advanceRemoteShift(by: dt)
+            }
+            let link = CADisplayLink(target: tick, selector: #selector(TerminalRemoteTick.step(_:)))
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+            remoteTickTime = CACurrentMediaTime()
+            remoteLink = link
+            link.add(to: .main, forMode: .common)
+        }
+    }
+
+    /// The rows leaving the new band, taken from one continuous column: the retained
+    /// leaving rows plus the band as it stood in `old`. A row's content position is kept,
+    /// so a band edge that moves (Codex's sticky header joining or leaving) never splices
+    /// a fixed row into the transcript or leaves a gap. `rows` is this frame's shift.
+    private func remoteLeavingRows(for band: Swift.Range<Int>, rows: Int, direction: Int,
+                                   from old: ScreenFrame) -> [[ScreenCell]] {
+        let region = remoteRegion ?? band
+        let retained = remoteRegion == nil ? 0 : max(0, remoteStrip.count - region.count)
+        if direction > 0 {
+            let column = Array(remoteStrip.prefix(retained)) + Array(old.lines[region])
+            let count = retained + band.lowerBound - region.lowerBound + rows
+            return Array(column.prefix(min(max(0, count), column.count)))
+        }
+        let column = Array(old.lines[region]) + Array(remoteStrip.suffix(retained))
+        let count = retained + region.upperBound - band.upperBound - rows
+        return Array(column.suffix(min(max(0, count), column.count)))
+    }
+
+    /// Whether every row of the established band still follows a `rows` shift (entering
+    /// rows excepted), with no cursor or selection in it.
+    private func keepsRemoteBand(_ region: Swift.Range<Int>, rows: Int, from old: ScreenFrame) -> Bool {
+        for y in region where region.contains(y + rows) {
+            if !screen.rowLooksEqual(y, to: old, y + rows) { return false }
+        }
+        for frame in [old, screen] {
+            if let cursor = frame.cursor, region.contains(cursor.y) { return false }
+            if region.contains(where: { frame.selection.indices.contains($0) && frame.selection[$0] != nil }) { return false }
+        }
+        return true
+    }
+
+    /// A header-only repaint has no translation to detect. Keep only the unchanged
+    /// interior: never animate a changed edge row or a cursor/selection in the band.
+    private func remoteBandTrimmedPastChangedEdges(from old: ScreenFrame) -> Swift.Range<Int>? {
+        guard let region = remoteRegion else { return nil }
+        let changed = region.filter { !screen.rowLooksEqual($0, to: old, $0) }
+        guard !changed.isEmpty else { return nil }
+        let lower = (changed.last { $0 < region.lowerBound + 2 }).map { $0 + 1 } ?? region.lowerBound
+        let upper = changed.first { $0 >= region.upperBound - 2 } ?? region.upperBound
+        guard upper - lower >= 8,
+              lower - region.lowerBound + region.upperBound - upper <= 2 else { return nil }
+        let trimmed = lower..<upper
+        guard changed.allSatisfy({ !trimmed.contains($0) }) else { return nil }
+        for frame in [old, screen] {
+            if let cursor = frame.cursor, trimmed.contains(cursor.y) { return nil }
+            if trimmed.contains(where: { frame.selection.indices.contains($0) && frame.selection[$0] != nil }) { return nil }
+        }
+        return trimmed
+    }
+
+    /// Transform commits only: no row invalidation or text rasterization during the drain.
+    func advanceRemoteShift(by dt: TimeInterval) {
+        guard remoteOffset != 0 else { return }
+        remoteOffset = remoteDrain.remaining(offset: remoteOffset, cellHeight: geometry().cellHeight,
+                                            time: CACurrentMediaTime(), dt: dt)
+        if abs(remoteOffset) * max(contentScaleFactor, 1) < 1 { snapRemoteShift(reason: "settled") }
+        else { layoutContent() }
+    }
+
+    private func snapRemoteShift(reason: String = "cancel") {
+        #if DEBUG
+        if reason != "settled", configuredRoute == .remote {
+            TerminalScrollTrace.shared?.remoteSnap(reason: reason, offset: remoteOffset)
+        }
+        #endif
+        remoteLink?.invalidate()
+        remoteLink = nil
+        remoteOffset = 0
+        remoteRegion = nil
+        remoteStrip.removeAll(keepingCapacity: true)
+        remoteClip.isHidden = true
+        remoteClip.layer.sublayerTransform = CATransform3DIdentity
+    }
+
+    /// Inverse-map the displayed band before cancellation. Retained rows beyond the current
+    /// frame have no remote target: consume those taps rather than clamping onto fixed chrome.
+    private func remoteTapCell(at point: CGPoint) -> (x: Int, y: Int)? {
+        let physical = cell(at: point)
+        let g = geometry()
+        // The unclamped row: padding outside the grid is never part of the moving band.
+        let row = Int(floor((point.y - g.origin.y) / g.cellHeight))
+        guard let region = remoteRegion, region.contains(row) else { return physical }
+        let y = Int(floor((point.y - g.origin.y - remoteOffset) / g.cellHeight))
+        guard region.contains(y) else { return nil }
+        return (physical.x, y)
     }
 
     private func drawCachedText(_ line: [ScreenCell], top: CGFloat, geometry g: Geometry) {
@@ -766,9 +1097,11 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// Shared by touch input and focused interaction tests.
     func handleTap(at point: CGPoint) {
         guard !suppressTap, let model else { return }
+        let target = remoteTapCell(at: point)
         cancelScrolling(resetFraction: false)
+        guard let target else { return }
         editMenu.dismissMenu()
-        switch model.tap(at: cell(at: point)) {
+        switch model.tap(at: target) {
         case .link(let url):
             menuLink = url
             editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
@@ -779,30 +1112,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         }
     }
 
-    /// Hold, then drag for arrow keys (see `ArrowStick`); hold and let go without dragging for Paste.
-    @objc private func longPressed(_ press: UILongPressGestureRecognizer) {
-        guard model != nil else { return }
-        if press.state == .began { cancelScrolling(resetFraction: false) }
-        let point = press.location(in: self)
-        switch press.state {
-        case .began:
-            beginStick(at: point)
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        case .changed:
-            moveStick(to: point)
-        case .ended:
-            let sent = stickSent
-            endStick()
-            if sent == 0, UIPasteboard.general.hasStrings {
-                menuLink = nil
-                editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
-            }
-        default:
-            endStick()
-        }
-    }
-
-    /// Starts a hold at a point: from a finger on the screen, or the space bar's trackpad.
+    /// Starts a hold of the space bar's trackpad at a point.
     private func beginStick(at point: CGPoint) {
         editMenu.dismissMenu()
         stickTimer?.invalidate()
@@ -910,7 +1220,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             snapshot.layer.position = CGPoint(x: padding, y: padding)
             insertSubview(snapshot, belowSubview: pinchLabel)
             pinchSnapshot = snapshot
-            setNeedsDisplay()
+            redrawContent()
         case .changed:
             guard pinching else { return }
             let raw = pinchStartSize * pinch.scale
@@ -953,7 +1263,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             fontSize = pinchSize
             onFontSize?(pinchSize)
         }
-        setNeedsDisplay()
+        redrawContent()
         guard let snapshot else { return }
         // Let the real screen draw underneath, then fade the snapshot away.
         UIView.animate(withDuration: 0.18, delay: 0.05, options: [.curveEaseOut]) {
@@ -998,6 +1308,10 @@ final class TerminalCanvasView: UIView, UITextInput {
         #if DEBUG
         TerminalScrollTrace.shared?.record("cancel", state: scrollView.isDecelerating ? 4 : 0, offset: scrollView.contentOffset.y)
         #endif
+        snapRemoteShift()
+        lastWheelSign = 0
+        lastWheelTimes.removeAll(keepingCapacity: true)
+        remoteDrain = RemoteScrollDrain()
         motionGeneration = nil
         model?.setScrollActive(false)
         wasDecelerating = false
@@ -1005,10 +1319,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         applyingScroll = true
         scrollView.stopScrollingAndZooming()
         applyingScroll = applying
-        if resetFraction, scrollFraction != 0 {
-            scrollFraction = 0
-            setNeedsDisplay()
-        }
+        if resetFraction { scrollFraction = 0 }
         if historyOrigin != 0 { synchronizeScrolling() }
     }
 
@@ -1104,7 +1415,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         if became {
             model?.wantsKeyboard = true
             model?.focusChanged(true)
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
         return became
     }
@@ -1114,7 +1425,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         if resigned {
             model?.wantsKeyboard = false
             model?.focusChanged(false)
-            setNeedsDisplay()
+            contentView.setNeedsDisplay()
         }
         return resigned
     }
@@ -1257,6 +1568,7 @@ extension TerminalCanvasView: UIEditMenuInteractionDelegate {
             })
             return UIMenu(title: url.absoluteString, children: actions)
         }
+        // No link: UIKit presents the menu itself on a pointer's secondary click.
         guard UIPasteboard.general.hasStrings else { return nil }
         return UIMenu(children: [
             UIAction(title: "Paste", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
@@ -1494,6 +1806,18 @@ struct TerminalCanvas: UIViewRepresentable {
     }
 }
 
+/// The canvas's painted rows, in a clipping view below its scroll view. It takes no touches:
+/// the canvas and its scroll view keep every gesture and the text input.
+final class TerminalContentView: UIView {
+    fileprivate weak var canvas: TerminalCanvasView?
+    fileprivate var isRemoteBand = false
+
+    override func draw(_ rect: CGRect) {
+        if isRemoteBand { canvas?.drawRemoteBand(rect) }
+        else { canvas?.drawContent(rect) }
+    }
+}
+
 /// A label with room around its text, for the zoom indicator.
 private final class PaddedLabel: UILabel {
     private let insets = UIEdgeInsets(top: 6, left: 12, bottom: 6, right: 12)
@@ -1519,6 +1843,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
             applyingScroll = true
             scrollView.contentOffset.y = Self.remoteScrollOrigin
             remoteRow = Int(floor(Self.remoteScrollOrigin / geometry().cellHeight))
+            remoteDrain.begin(at: scrollView.contentOffset.y, time: CACurrentMediaTime())
             applyingScroll = false
         }
         motionGeneration = model.scrollGeneration
@@ -1560,12 +1885,17 @@ extension TerminalCanvasView: UIScrollViewDelegate {
             // Output can rebase the VT between its write and the scheduled snapshot.
             // Keep that origin shift out of UIKit's native motion, including subpixels.
             historyOrigin += CGFloat((frame.scrollbar?.offset ?? row) - row) * height
+            // Changed rows repaint through `invalidate(from:)`; a fraction alone only moves them.
             screen = frame
-            setNeedsDisplay()
         case .remote:
+            remoteDrain.moved(to: offset, time: CACurrentMediaTime())
             let lines = row - remoteRow
             remoteRow = row
-            if lines != 0 { model.scroll(lines: lines, column: remoteCell.x, row: remoteCell.y) }
+            if lines != 0 {
+                lastWheelSign = lines > 0 ? 1 : -1
+                lastWheelTimes[lastWheelSign] = CACurrentMediaTime()
+                model.scroll(lines: lines, column: remoteCell.x, row: remoteCell.y)
+            }
         case .disabled: break
         }
         applyingScroll = false
@@ -1583,6 +1913,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         #endif
         wasDecelerating = decelerate
         if !decelerate {
+            remoteDrain.stop()
             motionGeneration = nil
             model?.setScrollActive(false)
             synchronizeScrolling()
@@ -1594,6 +1925,7 @@ extension TerminalCanvasView: UIScrollViewDelegate {
         TerminalScrollTrace.shared?.record("stop", offset: scrollView.contentOffset.y)
         #endif
         wasDecelerating = false
+        remoteDrain.stop()
         motionGeneration = nil
         model?.setScrollActive(false)
         synchronizeScrolling()
@@ -1780,4 +2112,10 @@ extension TerminalCanvasView {
     func closestPosition(to point: CGPoint) -> UITextPosition? { Position(cursor) }
     func closestPosition(to point: CGPoint, within range: UITextRange) -> UITextPosition? { range.end }
     func characterRange(at point: CGPoint) -> UITextRange? { Range(cursor, cursor) }
+}
+
+/// The display link retains its target, which only weakly captures the canvas.
+private final class TerminalRemoteTick: NSObject {
+    var fire: ((CADisplayLink) -> Void)?
+    @objc func step(_ link: CADisplayLink) { fire?(link) }
 }

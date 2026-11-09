@@ -41,7 +41,7 @@ final class TerminalScrollLabTests: XCTestCase {
                         let fed = CACurrentMediaTime()
                         canvas.screen = vt.frame()
                         let snapped = CACurrentMediaTime()
-                        canvas.draw(canvas.bounds)
+                        canvas.drawForTesting(canvas.bounds)
                         let end = CACurrentMediaTime()
                         if sample >= 30 {
                             input.append((encoded - start) * 1000)
@@ -66,14 +66,14 @@ final class TerminalScrollLabTests: XCTestCase {
         canvas.screen = vt.frame()
         let renderer = UIGraphicsImageRenderer(size: canvas.bounds.size)
         _ = renderer.image { _ in
-            canvas.draw(canvas.bounds)
+            canvas.drawForTesting(canvas.bounds)
             let initial = canvas.textRowRasterizations
-            canvas.draw(canvas.bounds)
+            canvas.drawForTesting(canvas.bounds)
             let repeated = canvas.textRowRasterizations - initial
             XCTAssertEqual(repeated, 0, "A visible iPad viewport must fit without LRU thrashing")
             vt.scroll(by: -1)
             canvas.screen = vt.frame()
-            canvas.draw(canvas.bounds)
+            canvas.drawForTesting(canvas.bounds)
             XCTAssertEqual(canvas.textRowRasterizations - initial - repeated, 1, "Only the entering row needs rasterization")
             print("CACHE_LAB grid=100x60 initial=\(initial) unchanged_misses=\(repeated) scroll_misses=\(canvas.textRowRasterizations - initial - repeated) bytes=\(canvas.textRowBytes)")
         }
@@ -205,15 +205,15 @@ final class TerminalScrollLabTests: XCTestCase {
                             let renderer = UIGraphicsImageRenderer(size: size, format: format)
                             var unchangedMisses = 0, scrollMisses = 0
                             _ = renderer.image { _ in
-                                canvas.draw(canvas.bounds)
+                                canvas.drawForTesting(canvas.bounds)
                                 let initial = canvas.textRowRasterizations
-                                canvas.draw(canvas.bounds)
+                                canvas.drawForTesting(canvas.bounds)
                                 unchangedMisses = canvas.textRowRasterizations - initial
                                 XCTAssertEqual(unchangedMisses, 0, "Visible rows must all fit")
                                 let repeated = canvas.textRowRasterizations
                                 terminal.scroll(by: -1)
                                 canvas.screen = terminal.frame()
-                                canvas.draw(canvas.bounds)
+                                canvas.drawForTesting(canvas.bounds)
                                 scrollMisses = canvas.textRowRasterizations - repeated
                                 XCTAssertEqual(scrollMisses, 1)
                                 let model = TerminalScreenModel(
@@ -223,9 +223,9 @@ final class TerminalScrollLabTests: XCTestCase {
                                 canvas.layoutIfNeeded()
                                 canvas.scrollViewWillBeginDragging(canvas.scrollView)
                                 canvas.scrollView.contentOffset.y -= 0.5
-                                canvas.draw(canvas.bounds)
+                                canvas.drawForTesting(canvas.bounds)
                                 let fractional = canvas.textRowRasterizations
-                                canvas.draw(canvas.bounds)
+                                canvas.drawForTesting(canvas.bounds)
                                 XCTAssertEqual(canvas.textRowRasterizations, fractional,
                                                "The fractional viewport including real overscan must fit too")
                                 XCTAssertLessThanOrEqual(canvas.textRowBytes, 32 * 1024 * 1024)

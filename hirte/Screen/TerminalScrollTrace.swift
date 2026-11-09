@@ -71,6 +71,14 @@ final class TerminalScrollTrace: NSObject {
                               touch: touch, offset: offset, height: height))
     }
 
+    func wheelEndedHold() {
+        record("wheel-ended-hold")
+    }
+
+    func remoteSnap(reason: String, offset: CGFloat) {
+        record("remote-snap-" + reason, offset: offset)
+    }
+
     private func flush() {
         guard !samples.isEmpty else { return }
         var data = Data()
