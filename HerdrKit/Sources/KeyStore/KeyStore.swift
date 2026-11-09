@@ -179,6 +179,7 @@ public enum KeyStoreError: Error, LocalizedError {
     case keychain(OSStatus)
     case accessControl(String)
     case noSecurityKeyAuthenticator
+    case privateKeyUnavailable(String)
 
     public var errorDescription: String? {
         switch self {
@@ -188,6 +189,9 @@ public enum KeyStoreError: Error, LocalizedError {
             "Keychain error \(status): \(SecCopyErrorMessageString(status, nil) as String? ?? "unknown")"
         case .accessControl(let message): "Could not set up key access control: \(message)"
         case .noSecurityKeyAuthenticator: "Security keys can't be used here."
+        case .privateKeyUnavailable(let label):
+            "The private key of “\(label)” is missing from the Keychain or can't be unlocked. "
+                + "Add the key again."
         }
     }
 }
@@ -197,11 +201,21 @@ public enum KeyStoreError: Error, LocalizedError {
 /// Secure Enclave keys are stored as their `dataRepresentation`: an opaque
 /// handle that only this device's Secure Enclave can use. Security keys are stored
 /// as their WebAuthn credential ID; the private key stays on the security key.
+///
+/// Software keys keep their private key apart, in `privateKeys`: readable only while the device
+/// is unlocked, and behind Face ID enforced by the Keychain when the key requires it. The records
+/// in `storage` hold only what is safe to read any time (label, public key), so listing keys never
+/// asks for Face ID.
 public final class KeyStore: Sendable {
     private let storage: any KeyStorage
+    private let privateKeys: any KeyStorage
 
-    public init(storage: any KeyStorage = KeychainKeyStorage()) {
+    public init(
+        storage: any KeyStorage = KeychainKeyStorage(),
+        privateKeys: any KeyStorage = KeychainKeyStorage(service: "hirte.ssh-private-keys", whenUnlockedOnly: true)
+    ) {
         self.storage = storage
+        self.privateKeys = privateKeys
     }
 
     public static var isSecureEnclaveAvailable: Bool { SecureEnclave.isAvailable }
@@ -237,9 +251,9 @@ public final class KeyStore: Sendable {
                 keyData: key.dataRepresentation)
         } else if allowSoftwareFallback {
             let key = P256.Signing.PrivateKey()
-            record = StoredKey(
-                info: SSHKeyInfo(label: label, kind: .software, publicKeyBlob: OpenSSH.publicKeyBlob(key.publicKey)),
-                keyData: key.rawRepresentation)
+            return try saveSoftware(
+                SSHKeyInfo(label: label, kind: .software, publicKeyBlob: OpenSSH.publicKeyBlob(key.publicKey)),
+                privateKey: key.rawRepresentation)
         } else {
             throw KeyStoreError.secureEnclaveUnavailable
         }
@@ -251,25 +265,21 @@ public final class KeyStore: Sendable {
     @discardableResult
     public func generateEd25519Key(label: String, requireBiometry: Bool = false) throws -> SSHKeyInfo {
         let key = Curve25519.Signing.PrivateKey()
-        let record = StoredKey(
-            info: SSHKeyInfo(
+        return try saveSoftware(
+            SSHKeyInfo(
                 label: label, kind: .software, requiresBiometry: requireBiometry,
                 publicKeyBlob: OpenSSH.ed25519Blob(key.publicKey)),
-            keyData: key.rawRepresentation)
-        try save(record)
-        return record.info
+            privateKey: key.rawRepresentation)
     }
 
     /// Stores a private key read with `PrivateKeyParser`, in the Keychain.
     @discardableResult
     public func importKey(_ key: ParsedPrivateKey, label: String, requireBiometry: Bool = false) throws -> SSHKeyInfo {
-        let record = StoredKey(
-            info: SSHKeyInfo(
+        try saveSoftware(
+            SSHKeyInfo(
                 label: label, kind: .software, requiresBiometry: requireBiometry,
                 publicKeyBlob: key.publicKeyBlob, isImported: true),
-            keyData: key.keyData)
-        try save(record)
-        return record.info
+            privateKey: key.keyData)
     }
 
     /// Remembers a security key registered with `SecurityKeyRegistration`.
@@ -297,15 +307,27 @@ public final class KeyStore: Sendable {
         }
         switch record.info.kind {
         case .secureEnclave:
+            guard let handle = record.keyData else { throw KeyStoreError.notFound(id) }
             return .secureEnclave(try SecureEnclave.P256.Signing.PrivateKey(
-                dataRepresentation: record.keyData, authenticationContext: authenticationContext))
+                dataRepresentation: handle, authenticationContext: authenticationContext))
         case .software:
-            return try PrivateKeyParser.signingKey(
-                algorithm: record.info.algorithm, keyData: record.keyData)
+            // Not moved yet (see `moveToPrivateKeys`): still in the record.
+            if let keyData = record.keyData {
+                return try PrivateKeyParser.signingKey(algorithm: record.info.algorithm, keyData: keyData)
+            }
+            let keyData: Data?
+            do {
+                keyData = try privateKeys.load(account: id.uuidString, authenticationContext: authenticationContext)
+            } catch KeyStoreError.keychain(let status) where status == errSecAuthFailed {
+                throw KeyStoreError.privateKeyUnavailable(record.info.label)
+            }
+            guard let keyData else { throw KeyStoreError.privateKeyUnavailable(record.info.label) }
+            return try PrivateKeyParser.signingKey(algorithm: record.info.algorithm, keyData: keyData)
         case .securityKey:
             guard let assert else { throw KeyStoreError.noSecurityKeyAuthenticator }
+            guard let credentialID = record.keyData else { throw KeyStoreError.notFound(id) }
             return .securityKey(try SecurityKeySigner(
-                publicKeyBlob: record.info.publicKeyBlob, credentialID: record.keyData, assert: assert))
+                publicKeyBlob: record.info.publicKeyBlob, credentialID: credentialID, assert: assert))
         }
     }
 
@@ -318,7 +340,15 @@ public final class KeyStore: Sendable {
     }
 
     public func deleteKey(id: UUID) throws {
+        try privateKeys.delete(account: id.uuidString)
         try storage.delete(account: id.uuidString)
+    }
+
+    /// Stores a software key: the private key first, so there is never a record without one.
+    private func saveSoftware(_ info: SSHKeyInfo, privateKey: Data) throws -> SSHKeyInfo {
+        try privateKeys.save(privateKey, account: info.id.uuidString, requireBiometry: info.requiresBiometry)
+        try save(StoredKey(info: info, keyData: nil))
+        return info
     }
 
     private func save(_ record: StoredKey) throws {
@@ -328,14 +358,28 @@ public final class KeyStore: Sendable {
     private func records() throws -> [StoredKey] {
         // Skip entries we cannot read rather than hiding every key.
         try storage.loadAll().compactMap { try? JSONDecoder().decode(StoredKey.self, from: $0) }
+            .map(moveToPrivateKeys)
+    }
+
+    /// Software keys saved before `privateKeys` existed keep their private key in the record, which
+    /// is readable from the first unlock on and has no Face ID of its own. Moves it out, once. If
+    /// that fails, the key keeps working from the record and moving is tried again next time.
+    private func moveToPrivateKeys(_ record: StoredKey) -> StoredKey {
+        guard record.info.kind == .software, let keyData = record.keyData else { return record }
+        do {
+            _ = try saveSoftware(record.info, privateKey: keyData)
+            return StoredKey(info: record.info, keyData: nil)
+        } catch {
+            return record
+        }
     }
 }
 
 struct StoredKey: Codable {
     var info: SSHKeyInfo
-    /// Secure Enclave handle, the private key (see `PrivateKeyParser.signingKey`) or a
-    /// security key's credential ID.
-    var keyData: Data
+    /// Secure Enclave handle or a security key's credential ID. A software key's private key is
+    /// in `KeyStore.privateKeys` instead (nil here), except in records saved before that.
+    var keyData: Data?
 }
 
 // MARK: - Storage
@@ -343,16 +387,36 @@ struct StoredKey: Codable {
 /// Persists opaque key records.
 public protocol KeyStorage: Sendable {
     func loadAll() throws -> [Data]
-    func save(_ data: Data, account: String) throws
+    /// Reads one record. One that requires biometry asks for it, unless `authenticationContext`
+    /// already passed it.
+    func load(account: String, authenticationContext: LAContext?) throws -> Data?
+    /// The accounts that have a record, without reading (or decrypting) the records.
+    func accounts() throws -> [String]
+    /// Saves one record; with `requireBiometry`, it can only be read after Face ID (or Touch ID).
+    /// Any enrolled face counts, so setting Face ID up again doesn't lock the record away.
+    func save(_ data: Data, account: String, requireBiometry: Bool) throws
     func delete(account: String) throws
+}
+
+extension KeyStorage {
+    public func load(account: String) throws -> Data? {
+        try load(account: account, authenticationContext: nil)
+    }
+
+    public func save(_ data: Data, account: String) throws {
+        try save(data, account: account, requireBiometry: false)
+    }
 }
 
 /// Generic-password items in the data protection keychain, never synced off the device.
 public struct KeychainKeyStorage: KeyStorage {
     public let service: String
+    /// Readable only while the device is unlocked, not from its first unlock on.
+    private let whenUnlockedOnly: Bool
 
-    public init(service: String = "hirte.ssh-keys") {
+    public init(service: String = "hirte.ssh-keys", whenUnlockedOnly: Bool = false) {
         self.service = service
+        self.whenUnlockedOnly = whenUnlockedOnly
     }
 
     private var baseQuery: [String: Any] {
@@ -376,14 +440,57 @@ public struct KeychainKeyStorage: KeyStorage {
         return items.compactMap { $0[kSecValueData as String] as? Data }
     }
 
-    public func save(_ data: Data, account: String) throws {
+    public func load(account: String, authenticationContext: LAContext?) throws -> Data? {
         var query = baseQuery
         query[kSecAttrAccount as String] = account
+        query[kSecReturnData as String] = true
+        if let authenticationContext {
+            query[kSecUseAuthenticationContext as String] = authenticationContext
+        }
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
+        return result as? Data
+    }
+
+    public func accounts() throws -> [String] {
+        var query = baseQuery
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        query[kSecReturnAttributes as String] = true
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
+        let items = result as? [[String: Any]] ?? []
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+    }
+
+    public func save(_ data: Data, account: String, requireBiometry: Bool) throws {
+        var query = baseQuery
+        query[kSecAttrAccount as String] = account
+        if requireBiometry {
+            // Changing an item behind biometry would ask for it: replace it instead.
+            try delete(account: account)
+            var error: Unmanaged<CFError>?
+            guard let access = SecAccessControlCreateWithFlags(
+                nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, .biometryAny, &error
+            ) else {
+                throw KeyStoreError.accessControl(error.map { "\($0.takeRetainedValue())" } ?? "unknown")
+            }
+            query[kSecValueData as String] = data
+            query[kSecAttrAccessControl as String] = access
+            let status = SecItemAdd(query as CFDictionary, nil)
+            guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
+            return
+        }
         let update: [String: Any] = [kSecValueData as String: data]
         var status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
         if status == errSecItemNotFound {
             query[kSecValueData as String] = data
-            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+            query[kSecAttrAccessible as String] = whenUnlockedOnly
+                ? kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                : kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             status = SecItemAdd(query as CFDictionary, nil)
         }
         guard status == errSecSuccess else { throw KeyStoreError.keychain(status) }
@@ -404,9 +511,28 @@ public final class InMemoryKeyStorage: KeyStorage, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String: Data] = [:]
 
+    private var biometry: Set<String> = []
+
     public init() {}
 
+    /// The accounts saved with `requireBiometry`.
+    public var biometryAccounts: Set<String> { lock.withLock { biometry } }
+
     public func loadAll() throws -> [Data] { lock.withLock { Array(items.values) } }
-    public func save(_ data: Data, account: String) throws { lock.withLock { items[account] = data } }
-    public func delete(account: String) throws { lock.withLock { _ = items.removeValue(forKey: account) } }
+    public func load(account: String, authenticationContext: LAContext?) throws -> Data? {
+        lock.withLock { items[account] }
+    }
+    public func accounts() throws -> [String] { lock.withLock { Array(items.keys) } }
+    public func save(_ data: Data, account: String, requireBiometry: Bool) throws {
+        lock.withLock {
+            items[account] = data
+            if requireBiometry { biometry.insert(account) } else { biometry.remove(account) }
+        }
+    }
+    public func delete(account: String) throws {
+        lock.withLock {
+            _ = items.removeValue(forKey: account)
+            biometry.remove(account)
+        }
+    }
 }

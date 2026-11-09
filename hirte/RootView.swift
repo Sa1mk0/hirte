@@ -107,6 +107,10 @@ struct RootView: View {
                 sessions.remove(id)
             }
         }
+        .onChange(of: hosts.passwordRevisions) { old, new in
+            // A new password: start over with it (Host doesn't hold it, so the check above misses it).
+            for (id, revision) in new where old[id] != revision { sessions.remove(id) }
+        }
         // Initial, not a `.task`: one runs later with the phase of its view's body, and could
         // overwrite a newer `.active` with it. Starting a follow needs an active window.
         .onChange(of: scenePhase, initial: true) { _, phase in
