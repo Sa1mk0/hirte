@@ -157,12 +157,12 @@ final class HostSession {
     /// are paused). Marks its agent read, now and after each turn while it stays on screen.
     func startLooking(at address: String) {
         looking[address, default: 0] += 1
+        PushController.shared.startedLooking(hostID: host.id, at: address)
         markLookedAt()
     }
 
-    func isLooking(at address: String) -> Bool { looking[address, default: 0] > 0 }
-
     func stopLooking(at address: String) {
+        PushController.shared.stoppedLooking(hostID: host.id, at: address)
         looking[address, default: 0] -= 1
         guard looking[address, default: 0] <= 0 else { return }
         looking.removeValue(forKey: address)

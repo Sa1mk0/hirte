@@ -62,6 +62,10 @@ final class PushController {
     /// The sessions up to each machine: more than one when iPad windows show it (each window's
     /// store connects for itself). The file goes through any of them.
     private(set) var live: [UUID: [HostSession]] = [:]
+    /// Terminals on screen (the terminal screen, a peek), per machine and address, counted. Kept
+    /// while the line is down: the screen stays up through a reconnect, so a banner for it would
+    /// still be wrong.
+    private var onScreen: [UUID: [String: Int]] = [:]
     private var operation: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard, registrar: (any PushRegistrar)? = nil) {
@@ -239,7 +243,18 @@ final class PushController {
     }
 
     func presents(_ route: PushRoute?) -> Bool {
-        Self.presents(route) { hostID, address in live[hostID]?.contains { $0.isLooking(at: address) } ?? false }
+        Self.presents(route) { hostID, address in onScreen[hostID]?[address] != nil }
+    }
+
+    func startedLooking(hostID: UUID, at address: String) {
+        onScreen[hostID, default: [:]][address, default: 0] += 1
+    }
+
+    func stoppedLooking(hostID: UUID, at address: String) {
+        guard var counts = onScreen[hostID] else { return }
+        counts[address, default: 0] -= 1
+        if counts[address, default: 0] <= 0 { counts.removeValue(forKey: address) }
+        onScreen[hostID] = counts.isEmpty ? nil : counts
     }
 
     /// A tapped notification: the root view opens its terminal once the machine is connected.

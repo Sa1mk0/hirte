@@ -197,12 +197,8 @@ struct PushControllerTests {
         push.connected(b)
         push.connected(b)
         #expect(push.live[hostID]?.count == 2)
-        let route = PushRoute(hostID: hostID, address: "t3", createdMs: nil)
-        a.startLooking(at: "t3")
-        #expect(!push.presents(route), "the window showing it counts, whichever connected last")
         push.disconnected(b)
         #expect(push.live[hostID]?.map { $0 === a } == [true], "only the window that lost its line is dropped")
-        #expect(!push.presents(route))
         // Off: the delete goes through the session still up (it fails here, no line, so it stays
         // noted), not through nothing.
         push.enabled = false
@@ -214,27 +210,35 @@ struct PushControllerTests {
 
     @Test func foregroundBannersSkipTheTerminalOnScreen() throws {
         let push = PushController(defaults: try defaults(), registrar: FakeRegistrar())
-        let machine = machine()
-        push.connected(machine)
         let route = PushRoute(hostID: hostID, address: "t3", createdMs: nil)
         #expect(push.presents(route), "not on screen yet")
-        machine.startLooking(at: "t3")
+        push.startedLooking(hostID: hostID, at: "t3")
         #expect(!push.presents(route))
         #expect(push.presents(PushRoute(hostID: hostID, address: "t4", createdMs: nil)))
         #expect(push.presents(PushRoute(hostID: UUID(), address: "t3", createdMs: nil)), "another machine's t3")
         #expect(push.presents(nil), "a notification without a route shows")
-        machine.stopLooking(at: "t3")
+        // The line down (the background, a reconnect, a failed line) leaves the screen up: still
+        // no banner for it.
+        let machine = machine()
+        push.connected(machine)
+        push.disconnected(machine)
+        #expect(!push.presents(route))
+        push.stoppedLooking(hostID: hostID, at: "t3")
         #expect(push.presents(route))
         // Seen twice at once (the screen and a peek): on screen until both are gone.
-        machine.startLooking(at: "t3")
-        machine.startLooking(at: "t3")
-        machine.stopLooking(at: "t3")
+        push.startedLooking(hostID: hostID, at: "t3")
+        push.startedLooking(hostID: hostID, at: "t3")
+        push.stoppedLooking(hostID: hostID, at: "t3")
         #expect(!push.presents(route))
-        machine.stopLooking(at: "t3")
+        push.stoppedLooking(hostID: hostID, at: "t3")
         #expect(push.presents(route))
-        push.disconnected(machine)
+        push.stoppedLooking(hostID: hostID, at: "t3")
+        #expect(push.presents(route), "one stop too many changes nothing")
+        // A session tells the app's controller what it shows.
         machine.startLooking(at: "t3")
-        #expect(push.presents(route), "a machine that lost its line can't be showing it")
+        #expect(!PushController.shared.presents(route))
+        machine.stopLooking(at: "t3")
+        #expect(PushController.shared.presents(route))
     }
 
     @Test func aTapIsTakenOnce() throws {
