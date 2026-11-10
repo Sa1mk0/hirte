@@ -11,8 +11,10 @@ struct RootView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var sessions = SessionStore()
     @State private var windowID = UUID()
-    @State private var pendingFollowRoute: FollowTask?
+    /// A terminal to open once its machine is connected (a tapped Live Activity or notification).
+    @State private var pendingRoute: TerminalRoute?
     private let follow = FollowController.shared
+    private let push = PushController.shared
     /// The machine shown in the sidebar, remembered across launches.
     @AppStorage("selectedHost") private var storedHost = ""
     @State private var selectedTerminal: String?
@@ -29,16 +31,25 @@ struct RootView: View {
     }
 
     private var pendingSessionConnected: Bool {
-        guard let task = pendingFollowRoute else { return false }
-        return sessions.existing(task.hostID)?.state == .connected
+        guard let route = pendingRoute else { return false }
+        return sessions.existing(route.hostID)?.state == .connected
     }
 
-    private func openFollowRoute() {
-        guard let task = pendingFollowRoute,
-              let session = sessions.existing(task.hostID), session.state == .connected else { return }
-        defer { pendingFollowRoute = nil }
-        guard let terminal = session.terminal(task.address), task.matches(hostID: session.host.id, terminal: terminal) else { return }
-        selectedTerminal = terminal.address
+    private func openRoute() {
+        guard let route = pendingRoute,
+              let session = sessions.existing(route.hostID), session.state == .connected else { return }
+        pendingRoute = nil
+        // Gone, or another terminal took its address: the machine's list is where it leads.
+        guard let address = route.destination(in: session.terminals) else { return }
+        selectedTerminal = address
+    }
+
+    /// Shows the route's machine and connects it; its terminal opens once the list is known.
+    private func follow(_ route: TerminalRoute) {
+        guard let host = hosts.hosts.first(where: { $0.id == route.hostID }) else { return }
+        pendingRoute = route
+        selectedHost.wrappedValue = host.id
+        sessions.session(for: host).start(keys: keys)
     }
 
     var body: some View {
@@ -74,22 +85,22 @@ struct RootView: View {
             sessions.session(for: host).start(keys: keys)
         }
         .onOpenURL { url in
-            guard let task = follow.route(for: url),
-                  let host = hosts.hosts.first(where: { $0.id == task.hostID }) else { return }
-            pendingFollowRoute = task
-            selectedHost.wrappedValue = host.id
-            sessions.session(for: host).start(keys: keys)
+            if let task = follow.route(for: url) { follow(TerminalRoute(task)) }
+        }
+        // A tapped notification, from cold too: the delegate keeps it until a window takes it.
+        .onChange(of: push.pendingRoute, initial: true) {
+            if let route = push.takeRoute() { follow(TerminalRoute(route)) }
         }
         .onChange(of: selectedHost.wrappedValue) {
-            // Reset before a connected follow route selects the new host's terminal.
+            // Reset before a connected route selects the new host's terminal.
             selectedTerminal = nil
         }
-        .onChange(of: pendingSessionConnected) { openFollowRoute() }
-        .task(id: pendingFollowRoute?.followID) {
-            guard pendingFollowRoute != nil else { return }
+        .onChange(of: pendingSessionConnected) { openRoute() }
+        .task(id: pendingRoute) {
+            guard pendingRoute != nil else { return }
             // Let the host selection settle before opening its detail.
             await Task.yield()
-            openFollowRoute()
+            openRoute()
         }
         #if DEBUG
         // `-hirte.demo YES` (videos, UI tests on a device with real machines): open the demo machine.
@@ -99,6 +110,7 @@ struct RootView: View {
         #endif
         .onChange(of: hosts.hosts) { _, current in
             follow.hostsChanged(Set(current.map(\.id)))
+            push.hostsChanged(Set(current.map(\.id)))
             // Edited or deleted machines get a fresh session.
             for host in current where sessions.existing(host.id).map({ $0.host != host }) ?? false {
                 sessions.remove(host.id)
@@ -117,7 +129,9 @@ struct RootView: View {
             follow.window(windowID, phase: phase)
             switch phase {
             case .background: sessions.pauseAll()
-            case .active: sessions.resumePaused(keys: keys)
+            case .active:
+                sessions.resumePaused(keys: keys)
+                push.windowActive()
             default: break
             }
         }

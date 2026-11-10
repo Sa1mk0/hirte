@@ -3,6 +3,8 @@ import SwiftUI
 
 @main
 struct HirteApp: App {
+    /// Notifications: the device token, and a tapped one (also from cold).
+    @UIApplicationDelegateAdaptor(PushAppDelegate.self) private var pushDelegate
     @State private var hosts = HostStore()
     @State private var keys = KeyLibrary()
     @AppStorage(Appearance.key) private var appearance = Appearance.system

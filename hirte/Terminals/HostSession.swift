@@ -17,7 +17,10 @@ final class HostSession {
     let host: Host
     private(set) var state: State = .idle {
         didSet {
-            if state != .connected { FollowController.shared.disconnected(self) }
+            if state != .connected {
+                FollowController.shared.disconnected(self)
+                PushController.shared.disconnected(self)
+            }
         }
     }
     private(set) var snapshot: TerminalSnapshot?
@@ -40,6 +43,9 @@ final class HostSession {
     /// Kept for the session so reconnects do not ask for Face ID again.
     private var signingKey: SigningKey?
     private var lastHeard = Date.distantPast
+    /// Work on the line for whoever removes this session (the token file's removal): `teardown`
+    /// lets it finish before closing the line.
+    var farewell: Task<Void, Never>?
     private let knownHosts: any KnownHostsStore
     private let passwords: PasswordStore
 
@@ -126,6 +132,25 @@ final class HostSession {
         return try await ssh.upload(data, fileName: fileName, progress: progress)
     }
 
+    // MARK: Push token file
+
+    /// Leaves this install's token file on the machine (`RemotePush`), on a channel of its own.
+    func writePushToken(_ file: PushTokenFile, installationID: String) async throws {
+        guard let ssh, state == .connected else { throw SessionError.connectionLost }
+        let data = try file.encoded()
+        let pipe = try await ssh.openExec(RemotePush.writeCommand(installationID: installationID, byteCount: data.count))
+        defer { pipe.close() }
+        try await pipe.write(data)
+        // Until the command ends; a failure comes with its stderr.
+        for try await _ in pipe.output {}
+    }
+
+    /// Also as the `farewell` of a removed session: the line is up until `teardown` closes it.
+    func deletePushToken(installationID: String) async throws {
+        guard let ssh else { throw SessionError.connectionLost }
+        _ = try await ssh.run(RemotePush.deleteCommand(installationID: installationID))
+    }
+
     // MARK: Read state
 
     /// Someone is looking at this terminal (the app is in front: in the background, sessions
@@ -134,6 +159,8 @@ final class HostSession {
         looking[address, default: 0] += 1
         markLookedAt()
     }
+
+    func isLooking(at address: String) -> Bool { looking[address, default: 0] > 0 }
 
     func stopLooking(at address: String) {
         looking[address, default: 0] -= 1
@@ -273,6 +300,7 @@ final class HostSession {
         lastHeard = .now
         state = .connected
         FollowController.shared.received(self)
+        PushController.shared.connected(self)
         markLookedAt()
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -319,6 +347,8 @@ final class HostSession {
     }
 
     private func teardown() async {
+        await farewell?.value
+        farewell = nil
         let (client, ssh) = (self.client, self.ssh)
         self.client = nil
         self.ssh = nil
@@ -407,8 +437,11 @@ final class SessionStore {
 
     func session(for host: Host) -> HostSession {
         if let session = sessions[host.id], session.host == host { return session }
-        if let old = sessions[host.id] { FollowController.shared.sessionRemoved(old) }
-        sessions[host.id]?.stop()
+        if let old = sessions[host.id] {
+            FollowController.shared.sessionRemoved(old)
+            PushController.shared.sessionRemoved(old)
+            old.stop()
+        }
         let session = HostSession(host: host)
         sessions[host.id] = session
         return session
@@ -422,6 +455,7 @@ final class SessionStore {
     func remove(_ hostID: UUID) {
         if let old = sessions.removeValue(forKey: hostID) {
             FollowController.shared.sessionRemoved(old)
+            PushController.shared.sessionRemoved(old)
             old.stop()
         }
     }

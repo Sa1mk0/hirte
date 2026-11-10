@@ -63,6 +63,8 @@ struct SettingsView: View {
 
             LiveActivitySettingsView()
 
+            PushSettingsView()
+
             Section("Agents") {
                 NavigationLink("Agent Overview") { AgentOverviewSettingsView() }
             }

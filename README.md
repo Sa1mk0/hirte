@@ -114,6 +114,13 @@ when its terminal and task identity still match. Stop Following, opting out, com
 terminal instance ends it. The menu explains why following is unavailable; notification permission
 is not required. This version does not provide reliable background monitoring.
 
+Notifications are optional too: Settings → Notifications tells you when an agent (not one of its
+helpers) waits for your decision, also while Hirte is closed. Hirte leaves its device token in
+`~/.config/hirte/push/<install>.json` on each machine it connects to (never for the demo), and
+removes it when you turn notifications off or remove the machine. A sender on the machine delivers
+the notifications through Apple's push service; `scripts/push-test.sh` documents the payload and
+sends one for testing. Tapping a notification opens its terminal.
+
 ### Optional host context
 
 On a host with the existing herdr-core, `hc`, `git` and Python 3, publish context for a chosen local
