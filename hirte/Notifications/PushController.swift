@@ -169,9 +169,8 @@ final class PushController {
     /// stops the session right after; its teardown waits for this, in turn after a write in flight.
     func sessionRemoved(_ session: HostSession) {
         disconnected(session)
-        guard written.remove(session.host.id) != nil, session.state == .connected else { return }
-        let installationID = installationID
-        session.farewell = enqueue { try? await session.deletePushToken(installationID: installationID) }
+        guard written.contains(session.host.id), session.state == .connected else { return }
+        session.farewell = delete(on: session)
     }
 
     /// Machines gone from the app can't be reached any more: forget their files.
@@ -195,10 +194,16 @@ final class PushController {
         enqueue { try? await session.writePushToken(file, installationID: installationID) }
     }
 
-    private func delete(on session: HostSession) {
-        written.remove(session.host.id)
+    /// Removes the file on `session`'s machine. The machine counts as clean only once that
+    /// returned: a delete that didn't get through (the line closed first) is tried again when
+    /// the machine next connects.
+    @discardableResult
+    private func delete(on session: HostSession) -> Task<Void, Never> {
         let installationID = installationID
-        enqueue { try? await session.deletePushToken(installationID: installationID) }
+        return enqueue {
+            guard (try? await session.deletePushToken(installationID: installationID)) != nil else { return }
+            self.written.remove(session.host.id)
+        }
     }
 
     /// One at a time, in order: a delete right after a write must win.

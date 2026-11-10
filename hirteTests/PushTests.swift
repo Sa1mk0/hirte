@@ -126,13 +126,15 @@ struct PushControllerTests {
         // The demo has no machine behind it; the real one is remembered as having the file (its
         // write over the line fails here, which is the best effort the contract asks for).
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [hostID.uuidString])
-        // The same token again changes nothing; off removes the file and the registration.
+        // The same token again changes nothing; off removes the registration and tries to remove
+        // the file. That didn't get through here (no line): the machine stays noted, so its next
+        // connect deletes (`actionOnConnect`).
         push.tokenReceived(token)
         push.enabled = false
         await push.waitForFiles()
         #expect(registrar.unregistered == 1)
         #expect(push.token == nil)
-        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
+        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [hostID.uuidString])
         // A token arriving after turning off is ignored.
         push.tokenReceived(token)
         #expect(push.token == nil)
@@ -151,11 +153,12 @@ struct PushControllerTests {
         let later = PushController(defaults: defaults, registrar: FakeRegistrar())
         later.hostsChanged([hostID, UUID()])
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [hostID.uuidString])
+        // Its session replaced (the machine was edited) while the line was down: nothing could be
+        // deleted, so it stays noted for the fresh session's connect.
         later.sessionRemoved(machine)
-        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
-        push.connected(machine)
-        await push.waitForFiles()
-        push.hostsChanged([])
+        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [hostID.uuidString])
+        // Gone from the app: can't be reached any more.
+        later.hostsChanged([])
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
     }
 
@@ -174,6 +177,8 @@ struct PushControllerTests {
         push.sessionRemoved(demo)
         #expect(demo.farewell != nil, "the delete runs before the teardown closes the line")
         await demo.farewell?.value
+        // The demo has no line, so the delete failed: still noted, for a next connect to try again.
+        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [demo.host.id.uuidString])
         // Forgotten only once the machine is gone from the app.
         push.hostsChanged([])
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
