@@ -82,7 +82,7 @@ final class TerminalScreenModel {
     /// In-memory terminal for deterministic input/render tests; never opens a host connection.
     convenience init(theme: TerminalTheme, terminal: VirtualTerminal) {
         self.init(theme: theme)
-        vt = terminal
+        adopt(terminal)
         frame = terminal.frame()
         phase = .live
     }
@@ -104,6 +104,14 @@ final class TerminalScreenModel {
         scheduleRender()
     }
     #endif
+
+    /// Makes an emulator this model's: its cell size for size reports, and what programs put on
+    /// the clipboard through it (tmux, vim, Claude Code's /copy: OSC 52) lands on the pasteboard.
+    private func adopt(_ vt: VirtualTerminal) {
+        vt.cellPixels = cellPixels
+        vt.onClipboardWrite = { UIPasteboard.general.string = $0 }
+        self.vt = vt
+    }
 
     /// No content yet, in the theme's colors (not the dark default, which flashed in light mode).
     private static func blank(_ theme: TerminalTheme) -> ScreenFrame {
@@ -177,10 +185,7 @@ final class TerminalScreenModel {
             let vt = try VirtualTerminal(
                 cols: max(attached.terminal.cols, 1), rows: max(attached.terminal.rows, 1))
             Self.apply(theme, to: vt)
-            vt.cellPixels = cellPixels
-            // tmux, vim and Claude Code's /copy set the clipboard through the terminal (OSC 52).
-            vt.onClipboardWrite = { UIPasteboard.general.string = $0 }
-            self.vt = vt
+            adopt(vt)
             stopped = false
             scrollGeneration &+= 1
             scrolledBack = false

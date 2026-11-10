@@ -159,8 +159,7 @@ final class TerminalFocusLabTests: XCTestCase {
     func testClipboardWritesAndPastesFollowTheTerminal() throws {
         let (_, model, terminal, window) = try canvas(mouse: false)
         defer { model.stop(); window.isHidden = true }
-        let before = UIPasteboard.general.string
-        defer { UIPasteboard.general.string = before ?? "" }
+        defer { UIPasteboard.general.string = "" }
         var input: [Data] = []
         model.sentInputForTesting = { input.append($0) }
         model.paste("a\nb")
@@ -168,8 +167,8 @@ final class TerminalFocusLabTests: XCTestCase {
         terminal.write(Data("\u{1b}[?2004h".utf8))
         model.paste("a\nb")
         XCTAssertEqual(input.last, Data("\u{1b}[200~a\nb\u{1b}[201~".utf8))
-        // The in-memory test terminal has no OSC 52 hookup (that happens on attach); the kit's own
-        // test covers decoding, so this checks the model's hookup indirectly through its API shape.
-        XCTAssertNotNil(terminal.encodePaste("x"))
+        // OSC 52 with base64 "hello", as output arriving from the program.
+        model.receiveOutputForTesting(Data("\u{1b}]52;c;aGVsbG8=\u{07}".utf8))
+        XCTAssertEqual(UIPasteboard.general.string, "hello", "the program's clipboard write is on the pasteboard")
     }
 }

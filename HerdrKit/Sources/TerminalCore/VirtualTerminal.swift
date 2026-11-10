@@ -131,9 +131,13 @@ public final class VirtualTerminal {
     /// tmux, vim and Claude Code's /copy. Write-only: no clipboard read callback is installed, so
     /// read requests get an empty answer and a program never sees the person's clipboard.
     public var onClipboardWrite: ((String) -> Void)?
-    /// Writes above this many bytes are refused; OSC 52 itself is bounded by the longest escape
-    /// sequence the parser takes, Kitty's protocol by `GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES`.
-    public var clipboardWriteLimit = 1 << 20
+    /// Writes above this many bytes are refused. A Kitty clipboard write (OSC 5522) is capped inside
+    /// libghostty-vt (`GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES`), so it fails with EFBIG before
+    /// the transaction is buffered; the default there is 64 MiB. OSC 52 is bounded by the longest
+    /// escape sequence the parser keeps (8 MiB at this pin, not settable through the C API).
+    public var clipboardWriteLimit = 1 << 20 {
+        didSet { applyClipboardWriteLimit() }
+    }
 
     public init(cols: Int, rows: Int, scrollbackLines: Int = 10_000) throws {
         self.cols = max(cols, 1)
@@ -194,6 +198,13 @@ public final class VirtualTerminal {
         }
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
             unsafeBitCast(clipboardWrite, to: UnsafeRawPointer.self))
+        applyClipboardWriteLimit()
+    }
+
+    /// The limit is captured when a Kitty write transaction begins, so it must be set before output.
+    private func applyClipboardWriteLimit() {
+        var limit = clipboardWriteLimit
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, &limit)
     }
 
     /// Hands the first text representation of a clipboard write on. A write without contents
@@ -782,6 +793,16 @@ public final class VirtualTerminal {
         guard result == GHOSTTY_SUCCESS else { return Data() }
         return Data(bytes: output, count: written)
     }
+
+    #if DEBUG
+    /// What libghostty-vt holds as the Kitty write limit, for the kit's tests.
+    var configuredClipboardWriteLimitForTesting: Int? {
+        var limit = 0
+        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_CLIPBOARD_WRITE_MAX_BYTES, &limit) == GHOSTTY_SUCCESS
+        else { return nil }
+        return limit
+    }
+    #endif
 
     private func check(_ result: GhosttyResult, _ what: String) throws {
         guard result == GHOSTTY_SUCCESS else { throw TerminalError.ghostty(what, Int32(result.rawValue)) }

@@ -303,3 +303,25 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
     vt.write(bytes("\u{1b}]52;c;b2s=\u{07}"))
     #expect(written.last == "ok")
 }
+
+/// Kitty's clipboard protocol (OSC 5522) buffers a write inside libghostty before our callback sees
+/// it: the limit has to stop it there, with EFBIG to the program, not after 64 MiB were allocated.
+@Test func kittyClipboardWritesStopAtTheLimitInsideTheLibrary() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 2)
+    var written: [String] = []
+    vt.onClipboardWrite = { written.append($0) }
+    // mime=base64("text/plain"); "Ghost" + "ty" in two chunks; the empty wdata commits.
+    let begin = "\u{1b}]5522;type=write:id=c1\u{1b}\\"
+    let chunks = "\u{1b}]5522;type=wdata:mime=dGV4dC9wbGFpbg==;R2hvc3Q=\u{1b}\\"
+        + "\u{1b}]5522;type=wdata:mime=dGV4dC9wbGFpbg==;dHk=\u{1b}\\"
+    let commit = "\u{1b}]5522;type=wdata\u{1b}\\"
+    vt.write(bytes(begin + chunks + commit))
+    #expect(written == ["Ghostty"])
+    #expect(String(decoding: vt.takeReplies(), as: UTF8.self).contains("status=DONE"))
+
+    vt.clipboardWriteLimit = 5
+    vt.write(bytes(begin + chunks + commit))
+    #expect(written == ["Ghostty"], "nothing reaches the callback")
+    #expect(String(decoding: vt.takeReplies(), as: UTF8.self).contains("status=EFBIG"))
+    #expect(vt.configuredClipboardWriteLimitForTesting == 5)
+}
