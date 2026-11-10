@@ -57,12 +57,15 @@ struct Attachment {
         return image(data, stem: "photo")
     }
 
-    /// A picked file, read while its security scope is open. Keeps its name and extension.
+    /// A picked file, read while its security scope is open. Keeps its name and extension; an
+    /// image (a saved HEIC, a full-size export) goes through `image` like a photo would.
     static func file(_ url: URL) throws -> Attachment {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let data = try Data(contentsOf: url)
-        return Attachment(data: data, stem: url.deletingPathExtension().lastPathComponent, ext: url.pathExtension)
+        let stem = url.deletingPathExtension().lastPathComponent
+        if RemoteUpload.imageExtension(data) != nil, let image = image(data, stem: stem) { return image }
+        return Attachment(data: data, stem: stem, ext: url.pathExtension)
     }
 
     /// Text or an image from an item provider (the key bar's paste control): text wins.

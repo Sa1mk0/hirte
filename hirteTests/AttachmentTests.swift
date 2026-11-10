@@ -46,6 +46,23 @@ struct AttachmentTests {
         #expect(abs(fitted.size.height - 2048) <= 1)
     }
 
+    private func temporaryFile(_ name: String, _ data: Data) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hirte-attachment-\(UUID().uuidString)-\(name)")
+        try data.write(to: url)
+        return url
+    }
+
+    /// A file from Files that is an image gets the photo treatment; anything else goes as it is.
+    @Test func filesThatAreImagesAreConvertedLikePhotos() throws {
+        let wide = try Attachment.file(try temporaryFile("export.png", png(width: 6000, height: 300)))
+        #expect(wide.ext == "png")
+        #expect(wide.stem == "export")
+        #expect(try #require(UIImage(data: wide.data)).size.width == 4096)
+        let text = try Attachment.file(try temporaryFile("notes.md", Data("# notes\n".utf8)))
+        #expect(text.ext == "md")
+        #expect(text.data == Data("# notes\n".utf8))
+    }
+
     @Test func undecodableBytesAreNoImage() {
         #expect(Attachment.image(Data("not an image at all, really".utf8), stem: "x") == nil)
     }
