@@ -1,4 +1,5 @@
 import HerdrKit
+import PhotosUI
 import SwiftUI
 
 /// The detail column: the live terminal screen, with its facts one tap away.
@@ -9,6 +10,13 @@ struct TerminalScreenView: View {
     @State private var model: TerminalScreenModel
     @State private var showingInfo = false
     @State private var showingFollowSettings = false
+    @State private var showingPhotos = false
+    @State private var showingFiles = false
+    @State private var pickedPhoto: PhotosPickerItem?
+    /// The pasteboard as last looked at: its image offer is decided when the menu is built, so it
+    /// is looked at again whenever the app comes to the front (where a copy elsewhere happens).
+    @State private var pasteboardChanges = UIPasteboard.general.changeCount
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage(TerminalFont.sizeKey) private var fontSize = TerminalFont.defaultSize
     @AppStorage(TerminalFont.storageKey) private var fontFamily = TerminalFont.jetBrainsMono
     /// Open terminals watching (observe) instead of taking them over; remembered.
@@ -75,9 +83,13 @@ struct TerminalScreenView: View {
         // The title bar sits on the terminal's background: match its brightness, not the app's.
         .toolbarColorScheme(theme.dark ? .dark : .light, for: .navigationBar)
         .onChange(of: theme, initial: true) { _, theme in model.theme = theme }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { pasteboardChanges = UIPasteboard.general.changeCount }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 if model.phase == .live { watchButton }
+                if model.phase == .live { attachMenu }
                 if sizeClass == .compact {
                     // A phone's bar keeps room for the title: the rest is one tap further.
                     Menu("More", systemImage: "ellipsis") {
@@ -97,6 +109,25 @@ struct TerminalScreenView: View {
             }
         }
         .liveActivityFollowPresentation(showingSettings: $showingFollowSettings)
+        // `.compatible` hands HEIC photos over as JPEG, which programs on the machine can read.
+        .photosPicker(isPresented: $showingPhotos, selection: $pickedPhoto, matching: .images, preferredItemEncoding: .compatible)
+        .onChange(of: pickedPhoto) { _, item in
+            guard let item else { return }
+            pickedPhoto = nil
+            Task {
+                guard let photo = await Attachment.photo(item) else { return model.failAttachment("The photo couldn't be read.") }
+                await model.attach(photo.data, stem: photo.stem, extension: photo.ext)
+            }
+        }
+        .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.item]) { result in
+            guard case .success(let url) = result else { return }
+            do {
+                let file = try Attachment.file(url)
+                Task { await model.attach(file.data, stem: file.stem, extension: file.ext) }
+            } catch {
+                model.failAttachment("The file couldn't be read: \(error.localizedDescription)")
+            }
+        }
         .sheet(isPresented: $showingInfo) {
             NavigationStack {
                 TerminalDetailView(session: session, address: address)
@@ -159,6 +190,24 @@ struct TerminalScreenView: View {
         Button("Info", systemImage: "info.circle") { showingInfo = true }
     }
 
+    /// Sends a photo, a file or the pasteboard's image to the machine and types its path, for the
+    /// program there (a coding agent) to read.
+    private var attachMenu: some View {
+        // Read here, in the body: the menu's content may be built along with it.
+        let hasImage = pasteboardChanges >= 0 && UIPasteboard.general.hasImages
+        return Menu("Attach", systemImage: "paperclip") {
+            Button("Photos…", systemImage: "photo.on.rectangle") { showingPhotos = true }
+            Button("Files…", systemImage: "folder") { showingFiles = true }
+            if hasImage {
+                Button("Paste Image", systemImage: "doc.on.clipboard") {
+                    guard let image = Attachment.pasteboardImage() else { return }
+                    Task { await model.attach(image.data, stem: image.stem, extension: image.ext) }
+                }
+            }
+        }
+        .disabled(model.attachment.map { if case .sending = $0 { true } else { false } } ?? false)
+    }
+
     /// Where it works and whose account, as its row says it: what it's about while you answer it.
     private func contextLine(_ terminal: Terminal) -> String {
         let context = TerminalContext(terminal: terminal)
@@ -187,7 +236,17 @@ struct TerminalScreenView: View {
             }
         case .live:
             // Watching needs no banner: the subtitle says so, with the size.
-            if model.sizeOwnedElsewhere && !model.watching {
+            if let attachment = model.attachment {
+                switch attachment {
+                case .sending(let name, let fraction):
+                    Banner(text: "Sending \(name)…", systemImage: "arrow.up.doc", dark: theme.dark, progress: fraction)
+                case .failed(let message):
+                    Button { model.dismissAttachmentFailure() } label: {
+                        Banner(text: message, systemImage: "exclamationmark.triangle", dark: theme.dark)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else if model.sizeOwnedElsewhere && !model.watching {
                 Banner(text: "Another viewer sets the size. Tap the screen and type to take over.",
                        systemImage: "rectangle.on.rectangle", dark: theme.dark)
             } else if model.scrolledBack {
@@ -210,16 +269,28 @@ private struct Banner: View {
     let text: String
     let systemImage: String
     var dark = true
+    /// An upload's share done; shown as a bar under the text.
+    var progress: Double?
 
     var body: some View {
-        Label(text, systemImage: systemImage)
-            .font(.callout)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.regularMaterial, in: Capsule())
-            .padding(.top, 8)
-            // Over the terminal, like the bar below: its brightness, not the app's.
-            .environment(\.colorScheme, dark ? .dark : .light)
+        VStack(alignment: .leading, spacing: 6) {
+            Label(text, systemImage: systemImage)
+                .font(.callout)
+                .lineLimit(3)
+            if let progress {
+                ProgressView(value: progress)
+                    .tint(Color.appControl)
+                    .accessibilityLabel("Sending")
+                    .accessibilityIdentifier("attachment-progress")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.regularMaterial, in: progress == nil ? AnyShape(Capsule()) : AnyShape(RoundedRectangle(cornerRadius: 18)))
+        .padding(.horizontal, 24)
+        .padding(.top, 8)
+        // Over the terminal, like the bar below: its brightness, not the app's.
+        .environment(\.colorScheme, dark ? .dark : .light)
     }
 }
 

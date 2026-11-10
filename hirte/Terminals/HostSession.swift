@@ -111,6 +111,21 @@ final class HostSession {
         try await connectedClient().remove(address)
     }
 
+    /// Stores a file in the login user's `~/.cache/hirte/uploads` on this machine, over the SSH
+    /// connection herdr-core runs on, and returns its absolute path. `progress` gets the bytes sent.
+    func upload(_ data: Data, fileName: String, progress: @escaping @Sendable (Int) -> Void) async throws -> String {
+        if host.isDemo {
+            // No machine behind the demo: pretend, slowly enough to show the progress.
+            for step in 1...4 {
+                try await Task.sleep(for: .milliseconds(250))
+                progress(data.count * step / 4)
+            }
+            return "\(homeFolder ?? "/Users/demo")/.cache/hirte/uploads/\(fileName)"
+        }
+        guard let ssh, state == .connected else { throw SessionError.connectionLost }
+        return try await ssh.upload(data, fileName: fileName, progress: progress)
+    }
+
     // MARK: Read state
 
     /// Someone is looking at this terminal (the app is in front: in the background, sessions

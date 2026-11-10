@@ -92,9 +92,10 @@ final class TerminalScrollUITests: XCTestCase {
         }
     }
 
-    /// Holding the terminal has no action of its own: no menu, and a hold then a drag scrolls.
+    /// Holding the terminal selects (HIRTE-20): the menu comes up, and a hold then a drag extends the
+    /// selection instead of scrolling; a tap takes it away and a plain drag still scrolls.
     @MainActor
-    func testHoldingTheTerminalOnlyScrolls() throws {
+    func testHoldingTheTerminalSelectsAndDraggingScrolls() throws {
         XCUIDevice.shared.orientation = .landscapeLeft
         let app = XCUIApplication()
         let appearance = ProcessInfo.processInfo.environment["HIRTE_UI_APPEARANCE"] ?? "light"
@@ -107,28 +108,34 @@ final class TerminalScrollUITests: XCTestCase {
         openRow("t1", in: app)
         let screen = app.descendants(matching: .any).matching(identifier: "terminal-screen").firstMatch
         XCTAssertTrue(screen.waitForExistence(timeout: 5))
-        let start = screen.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.3))
+        // Over the text (the dense demo's lines are short): a hold selects the word there.
+        let start = screen.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.3))
         start.press(forDuration: 1)
-        XCTAssertFalse(app.menuItems.firstMatch.waitForExistence(timeout: 1))
+        XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 3), "A hold selects a word and offers the edit menu")
         let scrolledBack = app.staticTexts["Scrolled back. Tap to return to the live screen."]
         XCTAssertFalse(scrolledBack.exists)
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "A hold brings no keyboard")
         let held = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         held.name = "hold-plain-" + appearance
         held.lifetime = .keepAlways
         add(held)
-        // UIKit may take a still hold as an ordinary tap, which focuses: put the keyboard away.
+        // A hold then a drag extends the selection; it never scrolls.
+        start.press(forDuration: 0.8, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 120)),
+                    withVelocity: XCUIGestureVelocity(rawValue: 300), thenHoldForDuration: 0.3)
+        XCTAssertFalse(scrolledBack.exists, "A hold then a drag selects instead of scrolling")
+        XCTAssertTrue(app.menuItems["Copy"].waitForExistence(timeout: 3))
+        // A tap beside the selection takes it away, and a plain drag scrolls as before.
+        screen.coordinate(withNormalizedOffset: CGVector(dx: 0.6, dy: 0.8)).tap()
+        XCTAssertTrue(app.menuItems.firstMatch.waitForNonExistence(timeout: 3))
         let hint = app.buttons["Continue"]
         if hint.waitForExistence(timeout: 1) { hint.tap() }
-        print("HOLD_PLAIN_FOCUSED=\(app.keyboards.firstMatch.exists)")
         if app.keyboards.firstMatch.exists {
-            let hideKeyboard = app.buttons["Hide keyboard"]
-            XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5))
-            hideKeyboard.tap()
+            app.buttons["Hide keyboard"].firstMatch.tap()
             XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
         }
-        start.press(forDuration: 0.8, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)),
+        start.press(forDuration: 0.05, thenDragTo: start.withOffset(CGVector(dx: 0, dy: 180)),
                     withVelocity: XCUIGestureVelocity(rawValue: 300), thenHoldForDuration: 0.3)
-        XCTAssertTrue(scrolledBack.waitForExistence(timeout: 3), "A hold then a drag scrolls the history")
+        XCTAssertTrue(scrolledBack.waitForExistence(timeout: 3), "A plain drag scrolls the history")
         XCTAssertFalse(app.menuItems.firstMatch.exists)
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = "hold-" + appearance

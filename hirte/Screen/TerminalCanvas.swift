@@ -2,6 +2,7 @@ import CoreText
 import HerdrKit
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Draws a `ScreenFrame` cell by cell and turns touches and keys into terminal input.
 final class TerminalCanvasView: UIView, UITextInput {
@@ -24,10 +25,16 @@ final class TerminalCanvasView: UIView, UITextInput {
             presentRemoteShift(from: oldValue)
             invalidate(from: oldValue)
             layoutContent()
+            layoutSelectionHandles()
             #if DEBUG
             TerminalScrollTrace.shared?.record("canvas", offset: CGFloat(screen.scrollbar?.offset ?? 0))
             #endif
         }
+    }
+    /// The screen's text, for UI tests and VoiceOver (read on demand: it costs a pass over the cells).
+    override var accessibilityValue: String? {
+        get { screen.text }
+        set {}
     }
     var fontSize: CGFloat = 13 {
         didSet {
@@ -116,6 +123,27 @@ final class TerminalCanvasView: UIView, UITextInput {
     /// The link a tap landed on, for the edit menu.
     private var menuLink: URL?
     private lazy var editMenu = UIEditMenuInteraction(delegate: self)
+    /// Holding selects the word under the finger (or, on empty screen, offers Paste); dragging on
+    /// extends the selection. The scroll view's pan waits for it to fail, so a still hold never
+    /// scrolls and a moving finger never holds.
+    private lazy var hold: UILongPressGestureRecognizer = {
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(held(_:)))
+        hold.delegate = self
+        return hold
+    }()
+    /// The selection's ends, dragged to move one of them (iOS's lollipops).
+    private let startHandle = SelectionHandle(end: .start)
+    private let endHandle = SelectionHandle(end: .end)
+    /// While a selection is dragged: the cells that stay put, in viewport rows at the current
+    /// scroll position (shifted as the drag scrolls). Holding a word, the word; dragging a handle,
+    /// the other end twice.
+    private var selectionAnchor: (start: TerminalScreenModel.Cell, end: TerminalScreenModel.Cell)?
+    /// Scrolls the history while a selection drag rests near the top or bottom edge.
+    private var edgeScroll: Timer?
+    private var edgeScrollLines = 0
+    /// Where the dragging finger is, for the edge scroll's ticks.
+    private var edgeScrollPoint = CGPoint.zero
+    private let selectionTick = UISelectionFeedbackGenerator()
     private var lastGrid: (cols: Int, rows: Int)?
     // UIKit owns gesture tracking and time-based deceleration. The canvas stays fixed;
     // only a viewport of cells (plus one real overscan row) is ever materialized.
@@ -292,6 +320,15 @@ final class TerminalCanvasView: UIView, UITextInput {
         pan.addTarget(self, action: #selector(panned))
         self.pan = pan
         addGestureRecognizer(edgeSwipe)
+        addGestureRecognizer(hold)
+        pan.require(toFail: hold)
+        for handle in [startHandle, endHandle] {
+            handle.isHidden = true
+            handle.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(handleDragged(_:))))
+            addSubview(handle)
+        }
+        // The key bar's paste control and drops hand their items here (text, or an image to send).
+        pasteConfiguration = UIPasteConfiguration(acceptableTypeIdentifiers: [UTType.text.identifier, UTType.image.identifier])
         addInteraction(editMenu)
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(keyboardWillChange(_:)),
@@ -1101,6 +1138,11 @@ final class TerminalCanvasView: UIView, UITextInput {
         cancelScrolling(resetFraction: false)
         guard let target else { return }
         editMenu.dismissMenu()
+        // A tap beside a selection only takes it away, like in a text view.
+        if model.hasSelection {
+            model.clearSelection()
+            return
+        }
         switch model.tap(at: target) {
         case .link(let url):
             menuLink = url
@@ -1194,6 +1236,130 @@ final class TerminalCanvasView: UIView, UITextInput {
         arrowPad.removeFromSuperview()
     }
 
+    // MARK: Selection
+
+    @objc private func held(_ hold: UILongPressGestureRecognizer) {
+        let point = hold.location(in: self)
+        switch hold.state {
+        case .began: holdBegan(at: point)
+        case .changed: selectionDragged(to: point)
+        case .ended, .cancelled, .failed: selectionDragEnded(at: point)
+        default: break
+        }
+    }
+
+    /// Selects the word under the finger and offers the edit menu; on empty screen the menu alone
+    /// (Paste). Shared with the tests.
+    func holdBegan(at point: CGPoint) {
+        guard let model else { return }
+        editMenu.dismissMenu()
+        cancelScrolling(resetFraction: false)
+        selectionTick.prepare()
+        if model.selectWord(at: cell(at: point)), let bounds = model.selectionBounds {
+            selectionAnchor = bounds
+            selectionTick.selectionChanged()
+        } else {
+            selectionAnchor = nil
+            if model.hasSelection { model.clearSelection() }
+        }
+        presentSelectionMenu(at: point)
+    }
+
+    /// Extends the selection from what stays put (the held word, or a handle's other end) to the
+    /// finger, in either direction; near the top or bottom edge the history scrolls along.
+    func selectionDragged(to point: CGPoint) {
+        guard let model, let anchor = selectionAnchor else { return }
+        editMenu.dismissMenu()
+        let cell = cell(at: point)
+        if (cell.y, cell.x) < (anchor.start.y, anchor.start.x) {
+            model.select(from: anchor.end, to: cell)
+        } else if (cell.y, cell.x) > (anchor.end.y, anchor.end.x) {
+            model.select(from: anchor.start, to: cell)
+        } else {
+            model.select(from: anchor.start, to: anchor.end)
+        }
+        let usable = usableRect
+        edgeScrollPoint = point
+        let lines = point.y < usable.minY + 28 ? -1 : point.y > usable.maxY - 28 ? 1 : 0
+        if lines != edgeScrollLines {
+            edgeScroll?.invalidate()
+            edgeScroll = nil
+            edgeScrollLines = lines
+            if lines != 0 {
+                edgeScroll = Timer.scheduledTimer(withTimeInterval: 0.07, repeats: true) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.edgeScrollTick() }
+                }
+            }
+        }
+    }
+
+    /// One row further into the history; the anchor keeps its text, so its viewport row moves.
+    private func edgeScrollTick() {
+        guard let model, var anchor = selectionAnchor else { return }
+        let before = screen.scrollbar?.offset ?? 0
+        screen = model.scrollHistory(by: edgeScrollLines)
+        let moved = (screen.scrollbar?.offset ?? 0) - before
+        guard moved != 0 else { return }
+        anchor.start.y -= moved
+        anchor.end.y -= moved
+        selectionAnchor = anchor
+        selectionDragged(to: edgeScrollPoint)
+    }
+
+    func selectionDragEnded(at point: CGPoint) {
+        edgeScroll?.invalidate()
+        edgeScroll = nil
+        edgeScrollLines = 0
+        guard selectionAnchor != nil else { return }
+        selectionAnchor = nil
+        if model?.hasSelection == true { presentSelectionMenu(at: point) }
+    }
+
+    @objc private func handleDragged(_ pan: UIPanGestureRecognizer) {
+        guard let model, let handle = pan.view as? SelectionHandle else { return }
+        // The finger holds the knob, which hangs off the cell: aim at the cell beside it.
+        let height = geometry().cellHeight
+        let point = pan.location(in: self).applying(.init(translationX: 0, y: handle.end == .start ? height * 0.7 : -height * 0.7))
+        switch pan.state {
+        case .began:
+            guard let bounds = model.selectionBounds else { return }
+            let fixed = handle.end == .start ? bounds.end : bounds.start
+            selectionAnchor = (fixed, fixed)
+            editMenu.dismissMenu()
+        case .changed:
+            selectionDragged(to: point)
+        default:
+            selectionDragEnded(at: point)
+        }
+    }
+
+    private func presentSelectionMenu(at point: CGPoint) {
+        menuLink = nil
+        editMenu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+    }
+
+    /// Puts the handles on the selection's first and last cell, when those are in view (the real row
+    /// a fractional scroll shows below the viewport included).
+    private func layoutSelectionHandles() {
+        guard let bounds = model?.selectionBounds, pinchSnapshot == nil, !cropped else {
+            startHandle.isHidden = true
+            endHandle.isHidden = true
+            return
+        }
+        let g = geometry()
+        let rows = screen.rows + (screen.lineBelow != nil ? 1 : 0)
+        for (handle, cell) in [(startHandle, bounds.start), (endHandle, bounds.end)] {
+            guard (0..<rows).contains(cell.y) else {
+                handle.isHidden = true
+                continue
+            }
+            let x = g.origin.x + CGFloat(cell.x + (handle.end == .start ? 0 : 1)) * g.cellWidth
+            let y = g.origin.y + CGFloat(cell.y) * g.cellHeight - scrollFraction
+            handle.place(at: CGPoint(x: x, y: y), cellHeight: g.cellHeight, color: .tintColor)
+            handle.isHidden = false
+        }
+    }
+
     /// Zooms in two steps, so pinching stays smooth: while the fingers move, only a snapshot of
     /// the screen scales (no new fonts, no redraw, no resize, no reflow of the scrollback); when
     /// they lift, the font changes once and one resize goes out.
@@ -1221,6 +1387,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             insertSubview(snapshot, belowSubview: pinchLabel)
             pinchSnapshot = snapshot
             redrawContent()
+            layoutSelectionHandles()
         case .changed:
             guard pinching else { return }
             let raw = pinchStartSize * pinch.scale
@@ -1264,6 +1431,7 @@ final class TerminalCanvasView: UIView, UITextInput {
             onFontSize?(pinchSize)
         }
         redrawContent()
+        layoutSelectionHandles()
         guard let snapshot else { return }
         // Let the real screen draw underneath, then fade the snapshot away.
         UIView.animate(withDuration: 0.18, delay: 0.05, options: [.curveEaseOut]) {
@@ -1522,17 +1690,46 @@ final class TerminalCanvasView: UIView, UITextInput {
         return keys
     }()
 
-    // MARK: Paste
+    // MARK: Copy and paste
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
         switch action {
-        case #selector(paste(_:)): UIPasteboard.general.hasStrings
+        case #selector(paste(_:)): UIPasteboard.general.hasStrings || UIPasteboard.general.hasImages
+        case #selector(copy(_:)): model?.hasSelection ?? false
+        case #selector(selectAll(_:)): model?.phase == .live
         default: super.canPerformAction(action, withSender: sender)
         }
     }
 
+    override func copy(_ sender: Any?) {
+        if let text = model?.copySelection() { UIPasteboard.general.string = text }
+    }
+
+    override func selectAll(_ sender: Any?) {
+        model?.selectAll()
+    }
+
+    /// Text is typed (pasted); an image alone goes to the machine and its path is typed.
     override func paste(_ sender: Any?) {
-        if let text = UIPasteboard.general.string { model?.paste(text) }
+        guard let model else { return }
+        if let text = UIPasteboard.general.string {
+            model.paste(text)
+        } else if let image = Attachment.pasteboardImage() {
+            Task { await model.attach(image.data, stem: image.stem, extension: image.ext) }
+        }
+    }
+
+    /// The key bar's paste control (no clipboard permission prompt: the control is the person's
+    /// own paste).
+    override func paste(itemProviders: [NSItemProvider]) {
+        guard let model else { return }
+        Task {
+            switch await Attachment.load(itemProviders) {
+            case .text(let text): model.paste(text)
+            case .image(let image): await model.attach(image.data, stem: image.stem, extension: image.ext)
+            case nil: break
+            }
+        }
     }
 
     // Key bar actions.
@@ -1568,13 +1765,18 @@ extension TerminalCanvasView: UIEditMenuInteractionDelegate {
             })
             return UIMenu(title: url.absoluteString, children: actions)
         }
-        // No link: UIKit presents the menu itself on a pointer's secondary click.
-        guard UIPasteboard.general.hasStrings else { return nil }
-        return UIMenu(children: [
-            UIAction(title: "Paste", image: UIImage(systemName: "doc.on.clipboard")) { [weak self] _ in
-                if let text = UIPasteboard.general.string { self?.model?.paste(text) }
-            },
-        ])
+        // A hold, or a pointer's secondary click: the system's own Copy, Paste and Select All
+        // (its Paste counts as the person's, so iOS asks no clipboard permission). It offers them
+        // by `canPerformAction`.
+        let standard: [Selector] = [#selector(copy(_:)), #selector(paste(_:)), #selector(selectAll(_:))]
+        let actions = suggestedActions.flatMap { element -> [UIMenuElement] in
+            if let menu = element as? UIMenu { return menu.children }
+            return [element]
+        }.filter { element in
+            guard let command = element as? UICommand else { return false }
+            return standard.contains(command.action)
+        }
+        return actions.isEmpty ? nil : UIMenu(children: actions)
     }
 }
 
@@ -1694,7 +1896,6 @@ final class KeyBar: UIInputView {
         let stack = UIStackView()
         stack.axis = .horizontal
         stack.spacing = 6
-        stack.distribution = .fillEqually
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -1708,7 +1909,8 @@ final class KeyBar: UIInputView {
         func button(_ title: String, symbol: String? = nil, label: String, action: @escaping () -> Void) -> UIButton {
             var config = UIButton.Configuration.gray()
             config.cornerStyle = .medium
-            // Eleven keys share the width: small insets, and one line ("ctrl" must not wrap).
+            // Nine keys share the width beside the paste control: small insets, and one line
+            // ("ctrl" must not wrap).
             config.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 2, bottom: 4, trailing: 2)
             config.titleLineBreakMode = .byClipping
             config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
@@ -1739,6 +1941,19 @@ final class KeyBar: UIInputView {
         stack.addArrangedSubview(button("^C", label: "Control C") { [weak self] in
             self?.target?.keyBarPressed(.letter("c"), modifiers: .control)
         })
+        // The system's paste control: pastes without iOS asking for clipboard permission, and
+        // greys itself out while the pasteboard has nothing we take (text or an image). The
+        // system draws it, and below its intrinsic width (41 pt) draws nothing: a blank square.
+        let pasteConfig = UIPasteControl.Configuration()
+        pasteConfig.displayMode = .iconOnly
+        pasteConfig.cornerStyle = .medium
+        pasteConfig.baseBackgroundColor = .tertiarySystemFill
+        pasteConfig.baseForegroundColor = .label
+        let paste = UIPasteControl(configuration: pasteConfig)
+        paste.target = target
+        paste.accessibilityLabel = "Paste"
+        paste.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        stack.addArrangedSubview(paste)
         for (symbol, key, label) in [
             ("arrow.left", TerminalKey.left, "Left"), ("arrow.down", .down, "Down"),
             ("arrow.up", .up, "Up"), ("arrow.right", .right, "Right"),
@@ -1750,9 +1965,51 @@ final class KeyBar: UIInputView {
         stack.addArrangedSubview(button("", symbol: "keyboard.chevron.compact.down", label: "Hide keyboard") {
             [weak self] in _ = self?.target?.resignFirstResponder()
         })
+        // All keys the same width; the paste control keeps its own.
+        let keys = stack.arrangedSubviews.compactMap { $0 as? UIButton }
+        for key in keys.dropFirst() { key.widthAnchor.constraint(equalTo: keys[0].widthAnchor).isActive = true }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
+}
+
+/// One end of the selection, as iOS draws it: a bar along the cell with a knob above the start
+/// and below the end. Dragging it moves that end.
+final class SelectionHandle: UIView {
+    enum End { case start, end }
+    let end: End
+    private let bar = UIView()
+    private let knob = UIView()
+    private static let knobSize: CGFloat = 11
+
+    init(end: End) {
+        self.end = end
+        super.init(frame: .zero)
+        isAccessibilityElement = true
+        accessibilityLabel = end == .start ? "Selection start" : "Selection end"
+        accessibilityIdentifier = end == .start ? "selection-start" : "selection-end"
+        knob.layer.cornerRadius = Self.knobSize / 2
+        addSubview(bar)
+        addSubview(knob)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    /// `point` is the top of the cell edge the bar sits on (the start's left edge, the end's right edge).
+    func place(at point: CGPoint, cellHeight: CGFloat, color: UIColor) {
+        let knobSize = Self.knobSize
+        frame = CGRect(x: point.x - knobSize / 2, y: point.y - (end == .start ? knobSize : 0),
+                       width: knobSize, height: cellHeight + knobSize)
+        bar.frame = CGRect(x: (knobSize - 2) / 2, y: end == .start ? knobSize : 0, width: 2, height: cellHeight)
+        knob.frame = CGRect(x: 0, y: end == .start ? 0 : cellHeight, width: knobSize, height: knobSize)
+        bar.backgroundColor = color
+        knob.backgroundColor = color
+    }
+
+    /// A finger needs more than the drawn handle.
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -18, dy: -12).contains(point)
+    }
 }
 
 /// SwiftUI wrapper.
@@ -1953,6 +2210,8 @@ extension TerminalCanvasView: UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        // A touch on a selection handle is the handle's drag, nothing else.
+        if touch.view is SelectionHandle { return false }
         if gestureRecognizer === edgeSwipe { edgeTouchStart = touch.location(in: self) }
         if gestureRecognizer is UITapGestureRecognizer {
             prepareForTouch()

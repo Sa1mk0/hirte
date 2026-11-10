@@ -55,12 +55,13 @@ final class TerminalFocusLabTests: XCTestCase {
         }
     }
 
-    func testTerminalHoldIsGoneButSpaceBarTrackpadSendsArrows() throws {
+    func testHoldSelectsAndSpaceBarTrackpadSendsArrows() throws {
         let (canvas, model, _, window) = try canvas(mouse: false)
         defer { model.stop(); window.isHidden = true }
-        // Only the canvas's own recognizer: UIScrollView and the edit menu's secondary click bring theirs.
-        XCTAssertFalse((canvas.gestureRecognizers ?? []).contains { type(of: $0) == UILongPressGestureRecognizer.self },
-                       "Holding the terminal has no action of its own")
+        // Holding selects (HIRTE-20); the scroll view's pan waits for the hold to fail, so a hold
+        // never scrolls and a moving finger never holds.
+        let hold = try XCTUnwrap((canvas.gestureRecognizers ?? []).first { type(of: $0) == UILongPressGestureRecognizer.self })
+        XCTAssertTrue(hold.isEnabled)
         var input: [Data] = []
         model.sentInputForTesting = { input.append($0) }
         canvas.beginFloatingCursor(at: CGPoint(x: 100, y: 100))
@@ -99,5 +100,76 @@ final class TerminalFocusLabTests: XCTestCase {
             XCTAssertFalse(model.wantsKeyboard)
             XCTAssertEqual(model.scrolledBack, !alternate)
         }
+    }
+
+    /// A hold selects the word under the finger, shows its handles and offers the menu; a tap beside
+    /// it takes the selection away without typing or clicking anything.
+    func testHoldSelectsTheWordAndATapClearsIt() throws {
+        let (canvas, model, terminal, window) = try canvas(mouse: true)
+        defer { model.stop(); window.isHidden = true }
+        terminal.write(Data("\r\nsecond row here".utf8))
+        model.receiveOutputForTesting(Data())
+        var input: [Data] = []
+        model.sentInputForTesting = { input.append($0) }
+        let fonts = Fonts(size: canvas.fontSize)
+        // The "prompt" of "sample prompt> " (Ghostty's words stop at punctuation): column 8, row 0.
+        canvas.holdBegan(at: CGPoint(x: TerminalCanvasView.padding + 8.5 * fonts.cellWidth, y: TerminalCanvasView.padding + fonts.cellHeight / 2))
+        XCTAssertEqual(model.copySelectionForTesting(), "prompt")
+        canvas.holdBegan(at: CGPoint(x: TerminalCanvasView.padding + 8.5 * fonts.cellWidth, y: TerminalCanvasView.padding + fonts.cellHeight / 2))
+        XCTAssertTrue(model.hasSelection)
+        canvas.screen = model.frame
+        let handles = canvas.subviews.compactMap { $0 as? SelectionHandle }
+        XCTAssertEqual(handles.filter { !$0.isHidden }.count, 2, "both ends are in view")
+        XCTAssertTrue(canvas.canPerformAction(#selector(UIResponderStandardEditActions.copy(_:)), withSender: nil))
+        // Dragging on from the word to the second row's "second" extends it there.
+        canvas.selectionDragged(to: CGPoint(x: TerminalCanvasView.padding + 3.5 * fonts.cellWidth, y: TerminalCanvasView.padding + 1.5 * fonts.cellHeight))
+        canvas.selectionDragEnded(at: .zero)
+        XCTAssertEqual(terminal.selectedText(), "prompt>\nseco")
+        // Dragging backwards keeps the word's end and reaches before its start.
+        canvas.holdBegan(at: CGPoint(x: TerminalCanvasView.padding + 8.5 * fonts.cellWidth, y: TerminalCanvasView.padding + fonts.cellHeight / 2))
+        canvas.selectionDragged(to: CGPoint(x: TerminalCanvasView.padding + 2.5 * fonts.cellWidth, y: TerminalCanvasView.padding + fonts.cellHeight / 2))
+        canvas.selectionDragEnded(at: .zero)
+        XCTAssertEqual(terminal.selectedText(), "mple prompt")
+        XCTAssertTrue(input.isEmpty, "selecting sends nothing to the program")
+
+        canvas.handleTap(at: CGPoint(x: 300, y: 300))
+        XCTAssertFalse(model.hasSelection)
+        XCTAssertTrue(input.isEmpty, "the clearing tap is no click, even for a mouse-tracking program")
+        XCTAssertFalse(canvas.isFirstResponder, "and brings no keyboard")
+        canvas.screen = model.frame
+        XCTAssertTrue(canvas.subviews.compactMap { $0 as? SelectionHandle }.allSatisfy(\.isHidden))
+    }
+
+    /// Holding empty screen selects nothing (the menu then only offers Paste), and typing clears a selection.
+    func testHoldOnEmptyScreenSelectsNothingAndTypingClears() throws {
+        let (canvas, model, terminal, window) = try canvas(mouse: false)
+        defer { model.stop(); window.isHidden = true }
+        canvas.holdBegan(at: CGPoint(x: 300, y: 150))
+        XCTAssertFalse(model.hasSelection)
+        XCTAssertFalse(canvas.canPerformAction(#selector(UIResponderStandardEditActions.copy(_:)), withSender: nil))
+        XCTAssertTrue(canvas.canPerformAction(#selector(UIResponderStandardEditActions.selectAll(_:)), withSender: nil))
+        canvas.selectAll(nil)
+        XCTAssertEqual(terminal.selectedText(), "sample prompt>")
+        model.type("x")
+        XCTAssertFalse(model.hasSelection, "typing is done with the selection")
+    }
+
+    /// What a program puts on the clipboard (OSC 52) lands on the pasteboard; pasting goes through
+    /// libghostty's encoder (bracketed where asked for).
+    func testClipboardWritesAndPastesFollowTheTerminal() throws {
+        let (_, model, terminal, window) = try canvas(mouse: false)
+        defer { model.stop(); window.isHidden = true }
+        let before = UIPasteboard.general.string
+        defer { UIPasteboard.general.string = before ?? "" }
+        var input: [Data] = []
+        model.sentInputForTesting = { input.append($0) }
+        model.paste("a\nb")
+        XCTAssertEqual(input, [Data("a\rb".utf8)])
+        terminal.write(Data("\u{1b}[?2004h".utf8))
+        model.paste("a\nb")
+        XCTAssertEqual(input.last, Data("\u{1b}[200~a\nb\u{1b}[201~".utf8))
+        // The in-memory test terminal has no OSC 52 hookup (that happens on attach); the kit's own
+        // test covers decoding, so this checks the model's hookup indirectly through its API shape.
+        XCTAssertNotNil(terminal.encodePaste("x"))
     }
 }

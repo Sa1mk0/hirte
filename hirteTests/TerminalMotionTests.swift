@@ -1026,6 +1026,8 @@ final class TerminalMotionTests: XCTestCase {
         extended.cursor = nil
         let reference = TerminalCanvasView(frame: CGRect(x: 0, y: 0, width: 500, height: 400))
         reference.contentScaleFactor = 2
+        // The same model: the selection's handles show in both (HIRTE-20).
+        reference.model = model
         reference.screen = extended
         func bitmap(_ view: TerminalCanvasView) -> CGImage {
             let format = UIGraphicsImageRendererFormat()

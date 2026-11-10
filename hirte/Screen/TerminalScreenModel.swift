@@ -26,6 +26,8 @@ final class TerminalScreenModel {
     /// Attached as an observer: watching at the size another viewer set, without resizing the
     /// terminal. The core ignores an observer's typing, so typing attaches again as a viewer.
     private(set) var watching = false
+    /// A photo or file on its way to the machine, or why the last one didn't make it.
+    private(set) var attachment: Attachment?
 
     /// Invalidates an in-flight gesture before detach, takeover, resize or input can retarget it.
     private(set) var scrollGeneration = 0 {
@@ -86,6 +88,15 @@ final class TerminalScreenModel {
     }
 
     var queuedInputForTesting: [Data] { pendingInput }
+
+    /// The selected text, keeping the selection (the pasteboard is left alone).
+    func copySelectionForTesting() -> String? { vt?.selectedText() }
+
+    /// Gives the in-memory terminal a session and address (uploads), without attaching.
+    func startForTesting(session: HostSession, address: String) {
+        self.session = session
+        self.address = address
+    }
 
     /// Matches the output pump's write/schedule sequence, without SSH or live host data.
     func receiveOutputForTesting(_ data: Data) {
@@ -167,6 +178,8 @@ final class TerminalScreenModel {
                 cols: max(attached.terminal.cols, 1), rows: max(attached.terminal.rows, 1))
             Self.apply(theme, to: vt)
             vt.cellPixels = cellPixels
+            // tmux, vim and Claude Code's /copy set the clipboard through the terminal (OSC 52).
+            vt.onClipboardWrite = { UIPasteboard.general.string = $0 }
             self.vt = vt
             stopped = false
             scrollGeneration &+= 1
@@ -266,15 +279,11 @@ final class TerminalScreenModel {
         send(vt.encode(key, modifiers: modifiers, text: text))
     }
 
+    /// Pastes text as the program expects it: bracketed (mode 2004) where it asked for that, so
+    /// shells and editors don't run pasted lines one by one; control bytes never get through.
     func paste(_ text: String) {
         guard let vt, !text.isEmpty else { return }
-        // Bracketed paste keeps shells and editors from running pasted lines one by one,
-        // but only programs that turned it on understand the markers.
-        if vt.bracketedPaste {
-            send(Data("\u{1b}[200~".utf8) + Data(text.utf8) + Data("\u{1b}[201~".utf8))
-        } else {
-            send(Data(text.replacingOccurrences(of: "\n", with: "\r").utf8))
-        }
+        send(vt.encodePaste(text))
     }
 
     func focusChanged(_ focused: Bool) {
@@ -298,6 +307,8 @@ final class TerminalScreenModel {
         sentInputForTesting?(data)
         TerminalScrollTrace.shared?.record("input", offset: CGFloat(data.count))
         #endif
+        // Typing (or pasting) is done with the selection, as on the desktop.
+        if hasSelection { clearSelection() }
         // Typing while watching takes over: attach as a viewer, then send what was typed.
         if watching {
             pendingInput.append(data)
@@ -407,6 +418,108 @@ final class TerminalScreenModel {
             return .handled
         }
         return .unhandled
+    }
+
+    // MARK: Selection
+
+    typealias Cell = (x: Int, y: Int)
+
+    var hasSelection: Bool { vt?.selectionBounds() != nil }
+
+    /// Where the selection starts and ends, in viewport cells (rows outside the viewport are
+    /// negative or past `rows`); nil without one.
+    var selectionBounds: (start: Cell, end: Cell)? { vt?.selectionBounds() }
+
+    /// Selects the word under a cell. False when there is no text there (a hold on empty screen
+    /// offers Paste alone).
+    func selectWord(at cell: Cell) -> Bool {
+        guard let vt else { return false }
+        vt.selectWord(at: cell)
+        guard let text = vt.selectedText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            vt.clearSelection()
+            renderNow()
+            return false
+        }
+        renderNow()
+        return true
+    }
+
+    /// Selects from one cell to another (either order); both may lie outside the viewport.
+    func select(from start: Cell, to end: Cell) {
+        guard let vt else { return }
+        vt.select(from: start, to: end)
+        renderNow()
+    }
+
+    func selectAll() {
+        guard let vt else { return }
+        vt.selectAll()
+        renderNow()
+    }
+
+    func clearSelection() {
+        guard let vt else { return }
+        vt.clearSelection()
+        renderNow()
+    }
+
+    /// The selected text as Ghostty copies it (soft wraps joined, trailing spaces trimmed), and
+    /// the selection is done with.
+    func copySelection() -> String? {
+        guard let vt, let text = vt.selectedText(), !text.isEmpty else { return nil }
+        clearSelection()
+        return text
+    }
+
+    // MARK: Attachments
+
+    enum Attachment: Equatable {
+        /// On its way: the share of bytes sent so far.
+        case sending(name: String, fraction: Double)
+        case failed(String)
+    }
+
+    /// At most this much goes over the line: the file is read into memory first.
+    static let attachmentLimit = 100 * 1024 * 1024
+
+    /// Stores a photo or file in the machine's `~/.cache/hirte/uploads` and types its path (and a
+    /// space, no Enter) into the terminal, for the program there to read it. Nothing is typed
+    /// unless the whole file arrived.
+    func attach(_ data: Data, stem: String, extension ext: String) async {
+        guard let session, let address, phase == .live else { return }
+        guard !data.isEmpty else { return attachment = .failed("The file is empty.") }
+        guard data.count <= Self.attachmentLimit else {
+            return attachment = .failed("The file is too large to send (over 100 MB).")
+        }
+        // `box/t7` runs on a machine this core added; our line goes to the core's machine, where
+        // the program couldn't read the file.
+        if let slash = address.firstIndex(of: "/") {
+            return attachment = .failed("This terminal runs on \(address[..<slash]), another machine; Hirte can only send files to the machine it is connected to.")
+        }
+        let name = RemoteUpload.fileName(stem: stem, extension: ext)
+        attachment = .sending(name: name, fraction: 0)
+        do {
+            let total = Double(data.count)
+            let path = try await session.upload(data, fileName: name) { [weak self] sent in
+                Task { @MainActor [weak self] in
+                    guard let self, case .sending(let name, _) = self.attachment else { return }
+                    self.attachment = .sending(name: name, fraction: Double(sent) / total)
+                }
+            }
+            attachment = nil
+            paste(RemoteUpload.pasteText(path: path, bracketed: vt?.bracketedPaste ?? false))
+        } catch {
+            attachment = .failed(error.localizedDescription)
+        }
+    }
+
+    /// Nothing reached the machine: the picked photo or file couldn't be read here.
+    func failAttachment(_ message: String) {
+        attachment = .failed(message)
+    }
+
+    func dismissAttachmentFailure() {
+        if case .failed = attachment { attachment = nil }
     }
 
     // MARK: Rendering
