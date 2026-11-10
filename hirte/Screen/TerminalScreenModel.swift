@@ -489,6 +489,9 @@ final class TerminalScreenModel {
     /// unless the whole file arrived.
     func attach(_ data: Data, stem: String, extension ext: String) async {
         guard let session, let address, phase == .live else { return }
+        // One at a time, whichever way it came in (the Attach menu, the edit menu, the key bar):
+        // two transfers would type two paths, and one's failure could replace the other's banner.
+        if case .sending = attachment { return }
         guard !data.isEmpty else { return attachment = .failed("The file is empty.") }
         guard data.count <= Attachment.sizeLimit else {
             return attachment = .failed(AttachmentError.tooLarge.localizedDescription)

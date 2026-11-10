@@ -103,11 +103,20 @@ struct AttachmentTests {
         #expect(typed.hasPrefix("/Users/demo/.cache/hirte/uploads/shot-"))
         #expect(typed.hasSuffix(".png "))
 
+        // A second upload while one is sending is ignored, whichever control started it.
+        async let first: Void = model.attach(png(width: 4, height: 4), stem: "one", extension: "png")
+        try await Task.sleep(for: .milliseconds(50))
+        #expect({ if case .sending = model.attachment { true } else { false } }())
+        await model.attach(png(width: 4, height: 4), stem: "two", extension: "png")
+        await first
+        #expect(input.count == 2, "only the first upload typed a path")
+        #expect(String(decoding: try #require(input.last), as: UTF8.self).contains("/uploads/one-"))
+
         await model.attach(Data(), stem: "empty", extension: "txt")
         #expect(model.attachment == .failed("The file is empty."))
         model.dismissAttachmentFailure()
         #expect(model.attachment == nil)
-        #expect(input.count == 1, "a failed upload types nothing")
+        #expect(input.count == 2, "a failed upload types nothing")
 
         // A terminal on a machine the core added: our line doesn't reach it.
         model.startForTesting(session: session, address: "box/t7")
@@ -117,6 +126,6 @@ struct AttachmentTests {
             return
         }
         #expect(message.contains("box"))
-        #expect(input.count == 1)
+        #expect(input.count == 2)
     }
 }
