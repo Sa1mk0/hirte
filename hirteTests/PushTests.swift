@@ -184,6 +184,34 @@ struct PushControllerTests {
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
     }
 
+    /// An iPad window has a session store of its own: a machine shown in two windows has two
+    /// sessions, and the one that connected last doesn't hide the other.
+    @Test func everyWindowsSessionCounts() async throws {
+        let defaults = try defaults()
+        defaults.set(true, forKey: PushController.enabledKey)
+        let push = PushController(defaults: defaults, registrar: FakeRegistrar())
+        let a = machine()
+        let b = machine()
+        push.tokenReceived(token)
+        push.connected(a)
+        push.connected(b)
+        push.connected(b)
+        #expect(push.live[hostID]?.count == 2)
+        let route = PushRoute(hostID: hostID, address: "t3", createdMs: nil)
+        a.startLooking(at: "t3")
+        #expect(!push.presents(route), "the window showing it counts, whichever connected last")
+        push.disconnected(b)
+        #expect(push.live[hostID]?.map { $0 === a } == [true], "only the window that lost its line is dropped")
+        #expect(!push.presents(route))
+        // Off: the delete goes through the session still up (it fails here, no line, so it stays
+        // noted), not through nothing.
+        push.enabled = false
+        await push.waitForFiles()
+        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [hostID.uuidString])
+        push.disconnected(a)
+        #expect(push.live[hostID] == nil)
+    }
+
     @Test func foregroundBannersSkipTheTerminalOnScreen() throws {
         let push = PushController(defaults: try defaults(), registrar: FakeRegistrar())
         let machine = machine()

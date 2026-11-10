@@ -59,7 +59,9 @@ final class PushController {
     /// Machines with a token file of this install, also from earlier runs: the file goes when the
     /// person turns notifications off, at once when connected, else when the machine next connects.
     private var written: Set<UUID> { didSet { defaults.set(written.map(\.uuidString).sorted(), forKey: Self.writtenKey) } }
-    private var connected: [UUID: HostSession] = [:]
+    /// The sessions up to each machine: more than one when iPad windows show it (each window's
+    /// store connects for itself). The file goes through any of them.
+    private(set) var live: [UUID: [HostSession]] = [:]
     private var operation: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard, registrar: (any PushRegistrar)? = nil) {
@@ -120,7 +122,9 @@ final class PushController {
         registrar.unregister()
         token = nil
         errorMessage = nil
-        for session in connected.values where written.contains(session.host.id) { delete(on: session) }
+        for (hostID, sessions) in live where written.contains(hostID) {
+            if let session = sessions.first { delete(on: session) }
+        }
     }
 
     func tokenReceived(_ deviceToken: Data) {
@@ -129,7 +133,9 @@ final class PushController {
         guard hex != token else { return }
         token = hex
         errorMessage = nil
-        for session in connected.values where !session.host.isDemo { write(to: session) }
+        for sessions in live.values {
+            if let session = sessions.first, !session.host.isDemo { write(to: session) }
+        }
     }
 
     func registrationFailed(_ error: any Error) {
@@ -152,7 +158,9 @@ final class PushController {
     /// The machine is connected: its file gets this run's token, or goes if notifications are off.
     /// (The demo is known too, for the terminal on screen, but never gets a file.)
     func connected(_ session: HostSession) {
-        connected[session.host.id] = session
+        if !live[session.host.id, default: []].contains(where: { $0 === session }) {
+            live[session.host.id, default: []].append(session)
+        }
         switch Self.actionOnConnect(
             enabled: enabled, hasToken: token != nil, isDemo: session.host.isDemo, wasWritten: written.contains(session.host.id)) {
         case .write: write(to: session)
@@ -161,8 +169,10 @@ final class PushController {
         }
     }
 
+    /// Only this session: another window's may still be up.
     func disconnected(_ session: HostSession) {
-        if connected[session.host.id] === session { connected.removeValue(forKey: session.host.id) }
+        live[session.host.id]?.removeAll { $0 === session }
+        if live[session.host.id]?.isEmpty == true { live.removeValue(forKey: session.host.id) }
     }
 
     /// The machine was removed or edited: its file goes while the line is still up. `SessionStore`
@@ -229,7 +239,7 @@ final class PushController {
     }
 
     func presents(_ route: PushRoute?) -> Bool {
-        Self.presents(route) { hostID, address in connected[hostID]?.isLooking(at: address) ?? false }
+        Self.presents(route) { hostID, address in live[hostID]?.contains { $0.isLooking(at: address) } ?? false }
     }
 
     /// A tapped notification: the root view opens its terminal once the machine is connected.
