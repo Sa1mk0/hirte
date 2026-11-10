@@ -1,4 +1,5 @@
 import HerdrKit
+import ImageIO
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -13,22 +14,26 @@ struct Attachment {
     static let largestSide: CGFloat = 4096
 
     /// An image as a program on the machine can read it: JPEG and PNG (GIF, WebP) go as they are;
-    /// HEIC and anything else a UIImage decodes become JPEG; only a huge one is scaled down.
+    /// HEIC and anything else ImageIO decodes become JPEG; only a huge one is scaled down. The size
+    /// comes from the header and the scaling from ImageIO's reduced decode: a 48 MP camera photo
+    /// never becomes a full-size bitmap here (that is ~190 MB, enough to be jettisoned).
     static func image(_ data: Data, stem: String) -> Attachment? {
         let known = RemoteUpload.imageExtension(data)
-        if let known, known != "heic", let image = UIImage(data: data), max(image.size.width, image.size.height) <= largestSide {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+              let height = properties[kCGImagePropertyPixelHeight] as? CGFloat
+        else { return nil }
+        if let known, known != "heic", max(width, height) <= largestSide {
             return Attachment(data: data, stem: stem, ext: known)
         }
-        guard let image = UIImage(data: data) else { return nil }
-        var fitted = image
-        let longest = max(image.size.width, image.size.height)
-        if longest > largestSide {
-            let scale = largestSide / longest
-            let size = CGSize(width: (image.size.width * scale).rounded(), height: (image.size.height * scale).rounded())
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            fitted = UIGraphicsImageRenderer(size: size, format: format).image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(largestSide),
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ]
+        guard let scaled = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        let fitted = UIImage(cgImage: scaled)
         if known == "png", let png = fitted.pngData() { return Attachment(data: png, stem: stem, ext: "png") }
         guard let jpeg = fitted.jpegData(compressionQuality: 0.9) else { return nil }
         return Attachment(data: jpeg, stem: stem, ext: "jpg")

@@ -23,12 +23,27 @@ struct AttachmentTests {
         #expect(image.stem == "shot")
     }
 
+    private func jpeg(width: Int, height: Int) -> Data {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height), format: format).jpegData(withCompressionQuality: 0.8) { context in
+            UIColor.systemOrange.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+
     @Test func hugeImagesAreScaledDownAndKeepPNG() throws {
         let image = try #require(Attachment.image(png(width: 6000, height: 300), stem: "wide"))
         #expect(image.ext == "png")
         let scaled = try #require(UIImage(data: image.data))
         #expect(scaled.size.width == 4096)
-        #expect(scaled.size.height == 205)
+        #expect(abs(scaled.size.height - 205) <= 1)
+        // A camera-sized JPEG stays JPEG, at most 4096 px a side.
+        let photo = try #require(Attachment.image(jpeg(width: 5000, height: 2500), stem: "photo"))
+        #expect(photo.ext == "jpg")
+        let fitted = try #require(UIImage(data: photo.data))
+        #expect(fitted.size.width == 4096)
+        #expect(abs(fitted.size.height - 2048) <= 1)
     }
 
     @Test func undecodableBytesAreNoImage() {
