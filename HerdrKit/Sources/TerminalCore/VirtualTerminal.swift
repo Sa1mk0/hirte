@@ -127,6 +127,13 @@ public final class VirtualTerminal {
     private var replies = Data()
     /// A cell's size in pixels, for size reports (mode 2048, XTWINOPS); 0 when unknown.
     public var cellPixels: (width: Int, height: Int) = (0, 0)
+    /// Text the program put on the clipboard (OSC 52, iTerm2's OSC 1337 Copy, Kitty's OSC 5522):
+    /// tmux, vim and Claude Code's /copy. Write-only: no clipboard read callback is installed, so
+    /// read requests get an empty answer and a program never sees the person's clipboard.
+    public var onClipboardWrite: ((String) -> Void)?
+    /// Writes above this many bytes are refused; OSC 52 itself is bounded by the longest escape
+    /// sequence the parser takes, Kitty's protocol by `GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES`.
+    public var clipboardWriteLimit = 1 << 20
 
     public init(cols: Int, rows: Int, scrollbackLines: Int = 10_000) throws {
         self.cols = max(cols, 1)
@@ -176,6 +183,32 @@ public final class VirtualTerminal {
         }
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
             unsafeBitCast(renderHold, to: UnsafeRawPointer.self))
+        let clipboardWrite: GhosttyTerminalClipboardWriteFn = { _, userdata, write in
+            guard let userdata, let write else { return }
+            let vt = Unmanaged<VirtualTerminal>.fromOpaque(userdata).takeUnretainedValue()
+            var reply = GhosttyClipboardWriteReply()
+            reply.size = MemoryLayout<GhosttyClipboardWriteReply>.size
+            reply.result = vt.clipboardWritten(write.pointee)
+                ? GHOSTTY_CLIPBOARD_WRITE_RESULT_SUCCESS : GHOSTTY_CLIPBOARD_WRITE_RESULT_UNSUPPORTED
+            write.pointee.reply?(write, &reply)
+        }
+        _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
+            unsafeBitCast(clipboardWrite, to: UnsafeRawPointer.self))
+    }
+
+    /// Hands the first text representation of a clipboard write on. A write without contents
+    /// asks to clear the clipboard: the person's clipboard is theirs, so that is refused.
+    private func clipboardWritten(_ write: GhosttyClipboardWrite) -> Bool {
+        guard write.contents_len > 0, let contents = write.contents else { return false }
+        for index in 0..<write.contents_len {
+            let content = contents[index]
+            let mime = String(decoding: UnsafeBufferPointer(start: content.mime.ptr, count: content.mime.len), as: UTF8.self)
+            guard mime.hasPrefix("text/") else { continue }
+            guard content.data.len <= clipboardWriteLimit else { return false }
+            onClipboardWrite?(String(decoding: UnsafeBufferPointer(start: content.data.ptr, count: content.data.len), as: UTF8.self))
+            return true
+        }
+        return false
     }
 
     deinit {
@@ -266,6 +299,28 @@ public final class VirtualTerminal {
 
     /// The program wants pastes wrapped in `ESC[200~` … `ESC[201~` (mode 2004).
     public var bracketedPaste: Bool { isPrivateModeEnabled(2004) }
+
+    /// Pasted text as libghostty encodes it for the program: control bytes (ESC, NUL, DEL…) become
+    /// spaces, so a paste can't inject sequences; wrapped in the mode 2004 markers when the program
+    /// turned them on, else newlines become Enter.
+    public func encodePaste(_ text: String) -> Data {
+        var input = text.utf8.map { CChar(bitPattern: $0) }
+        let bracketed = bracketedPaste
+        var needed = 0
+        let probe = input.withUnsafeMutableBufferPointer {
+            ghostty_paste_encode($0.baseAddress, $0.count, bracketed, nil, 0, &needed)
+        }
+        guard probe == GHOSTTY_OUT_OF_SPACE, needed > 0 else { return Data() }
+        var output = [UInt8](repeating: 0, count: needed)
+        var written = 0
+        let result = input.withUnsafeMutableBufferPointer { data in
+            output.withUnsafeMutableBufferPointer { buffer in
+                ghostty_paste_encode(data.baseAddress, data.count, bracketed, buffer.baseAddress, buffer.count, &written)
+            }
+        }
+        guard result == GHOSTTY_SUCCESS else { return Data() }
+        return Data(output.prefix(written))
+    }
 
     // MARK: Screen
 
@@ -599,8 +654,9 @@ public final class VirtualTerminal {
 
     // MARK: Selection
 
-    /// Selects from one viewport cell to another (inclusive). Ghostty keeps the
-    /// selection on the same text as the screen scrolls.
+    /// Selects from one viewport cell to another (inclusive), in either order; rows outside the
+    /// viewport (negative, or `rows` and more) are the scrollback above and below it. Ghostty keeps
+    /// the selection on the same text as the screen scrolls.
     public func select(from start: (x: Int, y: Int), to end: (x: Int, y: Int)) {
         endRenderHold()
         guard let from = gridRef(start), let to = gridRef(end) else { return }
@@ -624,9 +680,43 @@ public final class VirtualTerminal {
         }
     }
 
+    /// Selects everything: the scrollback and the screen.
+    public func selectAll() {
+        let offset = scrollbar?.offset ?? 0
+        let total = scrollbar?.total ?? rows
+        select(from: (0, -offset), to: (cols - 1, total - 1 - offset))
+    }
+
     public func clearSelection() {
         endRenderHold()
         _ = ghostty_terminal_set(terminal, GHOSTTY_TERMINAL_OPT_SELECTION, nil)
+    }
+
+    /// The selection's first and last cell (inclusive), in viewport cells as `select(from:to:)`
+    /// takes them: rows above the viewport are negative, rows below it `rows` and more. Nil
+    /// without a selection.
+    public func selectionBounds() -> (start: (x: Int, y: Int), end: (x: Int, y: Int))? {
+        var selection = GhosttySelection()
+        guard ghostty_terminal_get(terminal, GHOSTTY_TERMINAL_DATA_SELECTION, &selection) == GHOSTTY_SUCCESS else {
+            return nil
+        }
+        var ordered = GhosttySelection()
+        guard ghostty_terminal_selection_ordered(terminal, &selection, GHOSTTY_SELECTION_ORDER_FORWARD, &ordered)
+            == GHOSTTY_SUCCESS,
+            let start = screenPoint(ordered.start), let end = screenPoint(ordered.end)
+        else { return nil }
+        let offset = scrollbar?.offset ?? 0
+        return ((start.x, start.y - offset), (end.x, end.y - offset))
+    }
+
+    /// A cell's position counted from the top of the scrollback.
+    private func screenPoint(_ ref: GhosttyGridRef) -> (x: Int, y: Int)? {
+        var ref = ref
+        var coordinate = GhosttyPointCoordinate()
+        guard ghostty_terminal_point_from_grid_ref(terminal, &ref, GHOSTTY_POINT_TAG_SCREEN, &coordinate)
+            == GHOSTTY_SUCCESS
+        else { return nil }
+        return (Int(coordinate.x), Int(coordinate.y))
     }
 
     /// The selected text as Ghostty copies it: soft wraps joined, trailing spaces trimmed.
@@ -654,15 +744,16 @@ public final class VirtualTerminal {
         return String(decoding: UnsafeBufferPointer(start: pointer, count: length), as: UTF8.self)
     }
 
+    /// The cell at a viewport position. Rows outside the viewport (a fractional scroll exposes
+    /// one real row below it; a selection dragged past an edge reaches further) are addressed
+    /// in the scrollback instead of being clamped onto the viewport's edge rows.
     private func gridRef(_ point: (x: Int, y: Int)) -> GhosttyGridRef? {
         var position = GhosttyPoint()
         position.tag = GHOSTTY_POINT_TAG_VIEWPORT
         var row = min(max(point.y, 0), rows - 1)
-        // A fractional viewport can expose exactly one real row below it. Use its
-        // screen coordinate for links/selection, never clamp it onto the previous row.
-        if point.y == rows, let bar = scrollbar, !bar.atBottom {
+        if !(0..<rows).contains(point.y), let bar = scrollbar {
             position.tag = GHOSTTY_POINT_TAG_SCREEN
-            row = bar.offset + rows
+            row = min(max(bar.offset + point.y, 0), max(bar.total - 1, 0))
         }
         position.value.coordinate = GhosttyPointCoordinate(
             x: UInt16(clamping: min(max(point.x, 0), cols - 1)), y: UInt32(clamping: row))

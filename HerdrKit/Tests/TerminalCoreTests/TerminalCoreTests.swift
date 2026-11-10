@@ -229,3 +229,77 @@ private func bytes(_ s: String) -> Data { Data(s.utf8) }
     let click = String(decoding: vt.click(column: 10, row: 5) ?? Data(), as: UTF8.self)
     #expect(click == "\u{1b}[<0;11;6M\u{1b}[<0;11;6m")
 }
+
+// MARK: - Touch selection, paste encoding and the program's clipboard writes (HIRTE-20)
+
+@Test func selectionBoundsFollowTheWordAndTheScrollback() throws {
+    let vt = try VirtualTerminal(cols: 20, rows: 3)
+    for i in 1...10 { vt.write(bytes("line \(i) ready\r\n")) }
+    #expect(vt.selectionBounds() == nil)
+    // Viewport shows "line 9 ready", "line 10 ready" and the empty prompt row.
+    vt.selectWord(at: (2, 1))
+    #expect(vt.selectedText() == "line")
+    let word = try #require(vt.selectionBounds())
+    #expect(word.start == (0, 1) && word.end == (3, 1))
+    // Dragging up past the top edge reaches rows above the viewport (negative), in either order.
+    vt.select(from: word.end, to: (0, -2))
+    #expect(vt.selectedText() == "line 7 ready\nline 8 ready\nline 9 ready\nline")
+    let dragged = try #require(vt.selectionBounds())
+    #expect(dragged.start == (0, -2) && dragged.end == (3, 1))
+    // Scrolling back leaves the selection on the same text; the bounds move with the viewport.
+    vt.scroll(by: -2)
+    let scrolled = try #require(vt.selectionBounds())
+    #expect(scrolled.start == (0, 0) && scrolled.end == (3, 3))
+    #expect(vt.frame().selection == [0...19, 0...19, 0...19])
+}
+
+@Test func selectAllTakesTheScrollbackToo() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 2)
+    vt.write(bytes("one\r\ntwo\r\nthree"))
+    vt.selectAll()
+    #expect(vt.selectedText() == "one\ntwo\nthree")
+    let all = try #require(vt.selectionBounds())
+    #expect(all.start == (0, -1) && all.end == (9, 1))
+}
+
+@Test func selectingAnEmptyCellSelectsNothingToCopy() throws {
+    let vt = try VirtualTerminal(cols: 20, rows: 3)
+    vt.write(bytes("hi"))
+    vt.selectWord(at: (10, 2))
+    #expect((vt.selectedText() ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+}
+
+@Test func pasteEncodingFollowsTheModeAndStripsControlBytes() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 2)
+    // Without mode 2004, newlines become Enter; an ESC in the text can't start a sequence.
+    #expect(vt.encodePaste("ls\nid\u{1b}[2J") == bytes("ls\rid [2J"))
+    #expect(vt.encodePaste("") == Data())
+    vt.write(bytes("\u{1b}[?2004h"))
+    #expect(vt.encodePaste("a\nb") == bytes("\u{1b}[200~a\nb\u{1b}[201~"))
+    // The end marker inside a paste would let the text break out of the bracket.
+    #expect(vt.encodePaste("x\u{1b}[201~rm") == bytes("\u{1b}[200~x [201~rm\u{1b}[201~"))
+}
+
+@Test func programsWriteTheClipboardButNeverReadIt() throws {
+    let vt = try VirtualTerminal(cols: 10, rows: 2)
+    var written: [String] = []
+    vt.onClipboardWrite = { written.append($0) }
+    // OSC 52 with base64 "hello"; BEL and ST terminators both.
+    vt.write(bytes("\u{1b}]52;c;aGVsbG8=\u{07}"))
+    vt.write(bytes("\u{1b}]52;c;d29ybGQ=\u{1b}\\"))
+    #expect(written == ["hello", "world"])
+    // A read request gets no answer and reaches nobody.
+    vt.write(bytes("\u{1b}]52;c;?\u{07}"))
+    #expect(written.count == 2)
+    #expect(vt.takeReplies() == Data())
+    // Clearing is refused: the clipboard belongs to the person.
+    vt.write(bytes("\u{1b}]52;c;\u{07}"))
+    #expect(written.count == 2)
+    // Above the limit, nothing is handed on.
+    vt.clipboardWriteLimit = 4
+    vt.write(bytes("\u{1b}]52;c;aGVsbG8=\u{07}"))
+    #expect(written.count == 2)
+    vt.clipboardWriteLimit = 1 << 20
+    vt.write(bytes("\u{1b}]52;c;b2s=\u{07}"))
+    #expect(written.last == "ok")
+}
