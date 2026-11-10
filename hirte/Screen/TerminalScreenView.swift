@@ -116,14 +116,14 @@ struct TerminalScreenView: View {
             pickedPhoto = nil
             Task {
                 guard let photo = await Attachment.photo(item) else { return model.failAttachment("The photo couldn't be read.") }
-                await model.attach(photo.data, stem: photo.stem, extension: photo.ext)
+                model.attach(photo.data, stem: photo.stem, extension: photo.ext)
             }
         }
         .fileImporter(isPresented: $showingFiles, allowedContentTypes: [.item]) { result in
             guard case .success(let url) = result else { return }
             do {
                 let file = try Attachment.file(url)
-                Task { await model.attach(file.data, stem: file.stem, extension: file.ext) }
+                model.attach(file.data, stem: file.stem, extension: file.ext)
             } catch AttachmentError.tooLarge {
                 model.failAttachment(AttachmentError.tooLarge.localizedDescription)
             } catch {
@@ -203,7 +203,7 @@ struct TerminalScreenView: View {
             if hasImage {
                 Button("Paste Image", systemImage: "doc.on.clipboard") {
                     guard let image = Attachment.pasteboardImage() else { return }
-                    Task { await model.attach(image.data, stem: image.stem, extension: image.ext) }
+                    model.attach(image.data, stem: image.stem, extension: image.ext)
                 }
             }
         }

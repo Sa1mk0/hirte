@@ -97,22 +97,29 @@ struct AttachmentTests {
         var input: [Data] = []
         model.sentInputForTesting = { input.append($0) }
         model.startForTesting(session: session, address: "t5")
-        await model.attach(png(width: 4, height: 4), stem: "shot", extension: "png")
+        await model.attach(png(width: 4, height: 4), stem: "shot", extension: "png")?.value
         #expect(model.attachment == nil)
         let typed = String(decoding: try #require(input.last), as: UTF8.self)
         #expect(typed.hasPrefix("/Users/demo/.cache/hirte/uploads/shot-"))
         #expect(typed.hasSuffix(".png "))
 
         // A second upload while one is sending is ignored, whichever control started it.
-        async let first: Void = model.attach(png(width: 4, height: 4), stem: "one", extension: "png")
-        try await Task.sleep(for: .milliseconds(50))
+        let first = try #require(model.attach(png(width: 4, height: 4), stem: "one", extension: "png"))
         #expect({ if case .sending = model.attachment { true } else { false } }())
-        await model.attach(png(width: 4, height: 4), stem: "two", extension: "png")
-        await first
+        #expect(model.attach(png(width: 4, height: 4), stem: "two", extension: "png") == nil)
+        await first.value
         #expect(input.count == 2, "only the first upload typed a path")
         #expect(String(decoding: try #require(input.last), as: UTF8.self).contains("/uploads/one-"))
 
-        await model.attach(Data(), stem: "empty", extension: "txt")
+        // Leaving the screen cancels the transfer: nothing is typed, no banner is left behind.
+        let abandoned = try #require(model.attach(png(width: 4, height: 4), stem: "late", extension: "png"))
+        model.stop()
+        await abandoned.value
+        #expect(model.attachment == nil)
+        #expect(input.count == 2, "a finished-after-stop upload types nothing")
+        model.startForTesting(session: session, address: "t5")
+
+        model.attach(Data(), stem: "empty", extension: "txt")
         #expect(model.attachment == .failed("The file is empty."))
         model.dismissAttachmentFailure()
         #expect(model.attachment == nil)
@@ -120,7 +127,7 @@ struct AttachmentTests {
 
         // A terminal on a machine the core added: our line doesn't reach it.
         model.startForTesting(session: session, address: "box/t7")
-        await model.attach(png(width: 4, height: 4), stem: "shot", extension: "png")
+        model.attach(png(width: 4, height: 4), stem: "shot", extension: "png")
         guard case .failed(let message) = model.attachment else {
             Issue.record("another machine is a clear error")
             return

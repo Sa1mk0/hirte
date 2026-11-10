@@ -28,6 +28,9 @@ final class TerminalScreenModel {
     private(set) var watching = false
     /// A photo or file on its way to the machine, or why the last one didn't make it.
     private(set) var attachment: Attachment?
+    /// The transfer behind `.sending`; cancelled with the screen, so no file lands on the machine
+    /// whose path nobody receives.
+    @ObservationIgnored private var upload: Task<Void, Never>?
 
     /// Invalidates an in-flight gesture before detach, takeover, resize or input can retarget it.
     private(set) var scrollGeneration = 0 {
@@ -140,6 +143,8 @@ final class TerminalScreenModel {
 
     func stop() {
         stopped = true
+        upload?.cancel()
+        upload = nil
         scrollGeneration &+= 1
         displayLink?.invalidate()
         displayLink = nil
@@ -486,23 +491,34 @@ final class TerminalScreenModel {
 
     /// Stores a photo or file in the machine's `~/.cache/hirte/uploads` and types its path (and a
     /// space, no Enter) into the terminal, for the program there to read it. Nothing is typed
-    /// unless the whole file arrived.
-    func attach(_ data: Data, stem: String, extension ext: String) async {
-        guard let session, let address, phase == .live else { return }
+    /// unless the whole file arrived and the screen is still there. Returns the transfer, for
+    /// tests to await; nil when nothing was started.
+    @discardableResult
+    func attach(_ data: Data, stem: String, extension ext: String) -> Task<Void, Never>? {
+        guard let session, let address, phase == .live else { return nil }
         // One at a time, whichever way it came in (the Attach menu, the edit menu, the key bar):
         // two transfers would type two paths, and one's failure could replace the other's banner.
-        if case .sending = attachment { return }
-        guard !data.isEmpty else { return attachment = .failed("The file is empty.") }
+        if case .sending = attachment { return nil }
+        guard !data.isEmpty else { attachment = .failed("The file is empty."); return nil }
         guard data.count <= Attachment.sizeLimit else {
-            return attachment = .failed(AttachmentError.tooLarge.localizedDescription)
+            attachment = .failed(AttachmentError.tooLarge.localizedDescription)
+            return nil
         }
         // `box/t7` runs on a machine this core added; our line goes to the core's machine, where
         // the program couldn't read the file.
         if let slash = address.firstIndex(of: "/") {
-            return attachment = .failed("This terminal runs on \(address[..<slash]), another machine; Hirte can only send files to the machine it is connected to.")
+            attachment = .failed("This terminal runs on \(address[..<slash]), another machine; Hirte can only send files to the machine it is connected to.")
+            return nil
         }
         let name = RemoteUpload.fileName(stem: stem, extension: ext)
         attachment = .sending(name: name, fraction: 0)
+        let task = Task { [weak self] in await self?.send(data, named: name, through: session) }
+        upload = task
+        return task
+    }
+
+    private func send(_ data: Data, named name: String, through session: HostSession) async {
+        defer { upload = nil }
         do {
             let total = Double(data.count)
             let path = try await session.upload(data, fileName: name) { [weak self] sent in
@@ -512,9 +528,13 @@ final class TerminalScreenModel {
                 }
             }
             attachment = nil
+            // Finished as the screen went away: the path has no terminal to go to.
+            guard !stopped, !Task.isCancelled else { return }
             paste(RemoteUpload.pasteText(path: path, bracketed: vt?.bracketedPaste ?? false))
+        } catch is CancellationError {
+            attachment = nil
         } catch {
-            attachment = .failed(error.localizedDescription)
+            attachment = stopped ? nil : .failed(error.localizedDescription)
         }
     }
 

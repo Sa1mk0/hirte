@@ -101,30 +101,37 @@ extension SSHConnection {
         _ data: Data, fileName: String, progress: @escaping @Sendable (Int) -> Void = { _ in }
     ) async throws -> String {
         let pipe = try await openExec(RemoteUpload.command(fileName: fileName, byteCount: data.count))
-        defer { pipe.close() }
-        // Read while writing: the command can end early (no home, disk full), and its reason is
-        // in its stderr, which arrives on the output stream's failure.
-        let reading = Task {
-            var output = Data()
-            for try await chunk in pipe.output { output.append(chunk) }
-            return output
-        }
-        var sent = 0
-        do {
-            while sent < data.count {
-                let end = min(sent + 128 * 1024, data.count)
-                try await pipe.write(data.subdata(in: sent..<end))
-                sent = end
-                progress(sent)
+        // Cancelled (the screen went away): closing the channel ends `head -c` short, and the
+        // command's size check removes the partial file instead of leaving it behind.
+        return try await withTaskCancellationHandler {
+            defer { pipe.close() }
+            // Read while writing: the command can end early (no home, disk full), and its reason is
+            // in its stderr, which arrives on the output stream's failure.
+            let reading = Task {
+                var output = Data()
+                for try await chunk in pipe.output { output.append(chunk) }
+                return output
             }
-        } catch {
-            if case .failure(let ended) = await reading.result { throw ended }
-            throw error
+            var sent = 0
+            do {
+                while sent < data.count {
+                    try Task.checkCancellation()
+                    let end = min(sent + 128 * 1024, data.count)
+                    try await pipe.write(data.subdata(in: sent..<end))
+                    sent = end
+                    progress(sent)
+                }
+            } catch {
+                if case .failure(let ended) = await reading.result, !(ended is CancellationError) { throw ended }
+                throw error
+            }
+            let output = String(decoding: try await reading.value, as: UTF8.self)
+            guard let path = RemoteUpload.path(fromOutput: output) else {
+                throw UploadError.unexpectedOutput(output.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return path
+        } onCancel: {
+            pipe.close()
         }
-        let output = String(decoding: try await reading.value, as: UTF8.self)
-        guard let path = RemoteUpload.path(fromOutput: output) else {
-            throw UploadError.unexpectedOutput(output.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        return path
     }
 }

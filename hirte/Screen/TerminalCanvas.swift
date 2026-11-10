@@ -1715,7 +1715,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         if let text = UIPasteboard.general.string {
             model.paste(text)
         } else if let image = Attachment.pasteboardImage() {
-            Task { await model.attach(image.data, stem: image.stem, extension: image.ext) }
+            model.attach(image.data, stem: image.stem, extension: image.ext)
         }
     }
 
@@ -1726,7 +1726,7 @@ final class TerminalCanvasView: UIView, UITextInput {
         Task {
             switch await Attachment.load(itemProviders) {
             case .text(let text): model.paste(text)
-            case .image(let image): await model.attach(image.data, stem: image.stem, extension: image.ext)
+            case .image(let image): model.attach(image.data, stem: image.stem, extension: image.ext)
             case nil: break
             }
         }
