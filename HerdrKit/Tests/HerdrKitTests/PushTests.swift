@@ -35,7 +35,8 @@ private let hostID = UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FF")!
     #expect(command.contains("d=\"$HOME/.config/hirte/push\""))
     #expect(command.contains("mkdir -p \"$d\" && chmod 700 \"$d\""))
     #expect(command.contains("t=\"$d/.\(id).tmp\""))
-    #expect(command.contains("head -c 321 > \"$t\""))
+    // A symlink left at the temporary path would be followed by `>`: it goes first.
+    #expect(command.contains("rm -f \"$t\"; head -c 321 > \"$t\""))
     // A short write (the line dropped) must fail and leave no file behind.
     #expect(command.contains("= 321 ] || { rm -f \"$t\""))
     #expect(command.contains("mv -f \"$t\" \"$d/\(id).json\""))

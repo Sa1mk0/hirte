@@ -65,12 +65,13 @@ public enum RemotePush {
     /// `PushTokenFile.encoded()`) as `<installationID>.json`, in place of an earlier one. It goes
     /// through a temporary file and `mv`, so a reader never sees a part; `head -c` stops at the count,
     /// so the channel needs no EOF, and the size check turns a line dropped mid-way into an error.
-    /// Nothing of the file's content is in the command; `installationID` must pass
-    /// `isInstallationID`, as it is not quoted.
+    /// The temporary file is removed first: `>` would follow a symlink left there. Nothing of the
+    /// file's content is in the command; `installationID` must pass `isInstallationID`, as it is
+    /// not quoted.
     public static func writeCommand(installationID: String, byteCount: Int) -> String {
         precondition(isInstallationID(installationID), "installation IDs are lowercase hex and dashes")
         return "sh -c 'umask 077; d=\"\(directory)\"; mkdir -p \"$d\" && chmod 700 \"$d\" || exit 1; "
-            + "t=\"$d/.\(installationID).tmp\"; head -c \(byteCount) > \"$t\" || exit 1; "
+            + "t=\"$d/.\(installationID).tmp\"; rm -f \"$t\"; head -c \(byteCount) > \"$t\" || exit 1; "
             + "[ \"$(wc -c < \"$t\" | tr -d \" \")\" = \(byteCount) ] || { rm -f \"$t\"; echo \"the token file stopped short\" >&2; exit 1; }; "
             + "mv -f \"$t\" \"$d/\(installationID).json\"'"
     }
