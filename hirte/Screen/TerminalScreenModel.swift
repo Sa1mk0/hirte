@@ -484,17 +484,14 @@ final class TerminalScreenModel {
         case failed(String)
     }
 
-    /// At most this much goes over the line: the file is read into memory first.
-    static let attachmentLimit = 100 * 1024 * 1024
-
     /// Stores a photo or file in the machine's `~/.cache/hirte/uploads` and types its path (and a
     /// space, no Enter) into the terminal, for the program there to read it. Nothing is typed
     /// unless the whole file arrived.
     func attach(_ data: Data, stem: String, extension ext: String) async {
         guard let session, let address, phase == .live else { return }
         guard !data.isEmpty else { return attachment = .failed("The file is empty.") }
-        guard data.count <= Self.attachmentLimit else {
-            return attachment = .failed("The file is too large to send (over 100 MB).")
+        guard data.count <= Attachment.sizeLimit else {
+            return attachment = .failed(AttachmentError.tooLarge.localizedDescription)
         }
         // `box/t7` runs on a machine this core added; our line goes to the core's machine, where
         // the program couldn't read the file.

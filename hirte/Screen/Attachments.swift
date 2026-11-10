@@ -12,6 +12,8 @@ struct Attachment {
 
     /// Longest side above which an image is scaled down before it goes out.
     static let largestSide: CGFloat = 4096
+    /// At most this much goes over the line: the file is read into memory first.
+    static let sizeLimit = 100 * 1024 * 1024
 
     /// An image as a program on the machine can read it: JPEG and PNG (GIF, WebP) go as they are;
     /// HEIC and anything else ImageIO decodes become JPEG; only a huge one is scaled down. The size
@@ -63,9 +65,11 @@ struct Attachment {
 
     /// A picked file, read while its security scope is open. Keeps its name and extension; an
     /// image (a saved HEIC, a full-size export) goes through `image` like a photo would.
-    static func file(_ url: URL) throws -> Attachment {
+    static func file(_ url: URL, limit: Int = sizeLimit) throws -> Attachment {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Refuse by size before reading: a video or archive over the limit must not be allocated.
+        if let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > limit { throw AttachmentError.tooLarge }
         let data = try Data(contentsOf: url)
         let stem = url.deletingPathExtension().lastPathComponent
         if RemoteUpload.imageExtension(data) != nil, let image = image(data, stem: stem) { return image }
@@ -90,6 +94,16 @@ struct Attachment {
     enum Loaded {
         case text(String)
         case image(Attachment)
+    }
+}
+
+enum AttachmentError: LocalizedError {
+    case tooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .tooLarge: "The file is too large to send (over 100 MB)."
+        }
     }
 }
 

@@ -124,6 +124,8 @@ struct TerminalScreenView: View {
             do {
                 let file = try Attachment.file(url)
                 Task { await model.attach(file.data, stem: file.stem, extension: file.ext) }
+            } catch AttachmentError.tooLarge {
+                model.failAttachment(AttachmentError.tooLarge.localizedDescription)
             } catch {
                 model.failAttachment("The file couldn't be read: \(error.localizedDescription)")
             }

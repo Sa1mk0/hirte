@@ -77,6 +77,14 @@ struct AttachmentTests {
         #expect(pasted.data == gif)
     }
 
+    /// Over the limit, the file is refused by its size, before any of it is read.
+    @Test func filesOverTheLimitAreRefusedWithoutReading() throws {
+        let url = try temporaryFile("big.bin", Data(repeating: 7, count: 1024))
+        #expect(throws: AttachmentError.self) { try Attachment.file(url, limit: 512) }
+        #expect(AttachmentError.tooLarge.localizedDescription == "The file is too large to send (over 100 MB).")
+        #expect(try Attachment.file(url, limit: 1024).data.count == 1024)
+    }
+
     @Test func undecodableBytesAreNoImage() {
         #expect(Attachment.image(Data("not an image at all, really".utf8), stem: "x") == nil)
     }
