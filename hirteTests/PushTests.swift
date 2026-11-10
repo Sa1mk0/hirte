@@ -159,6 +159,26 @@ struct PushControllerTests {
         #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
     }
 
+    /// A connected machine that is removed: its delete is armed as the session's farewell, which
+    /// the teardown waits for before the line closes. (The demo stands in for a connected machine;
+    /// the root view removes sessions before it tells the controller which machines remain.)
+    @Test func removingAConnectedMachineDeletesBeforeTheLineCloses() async throws {
+        let defaults = try defaults()
+        let demo = HostSession(host: .makeDemo())
+        defaults.set([demo.host.id.uuidString], forKey: PushController.writtenKey)
+        let push = PushController(defaults: defaults, registrar: FakeRegistrar())
+        demo.start(keys: KeyLibrary())
+        await settle { demo.state == .connected }
+        defer { demo.stop() }
+        push.connected(demo)
+        push.sessionRemoved(demo)
+        #expect(demo.farewell != nil, "the delete runs before the teardown closes the line")
+        await demo.farewell?.value
+        // Forgotten only once the machine is gone from the app.
+        push.hostsChanged([])
+        #expect(defaults.stringArray(forKey: PushController.writtenKey) == [])
+    }
+
     @Test func foregroundBannersSkipTheTerminalOnScreen() throws {
         let push = PushController(defaults: try defaults(), registrar: FakeRegistrar())
         let machine = machine()

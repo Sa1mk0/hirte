@@ -110,7 +110,6 @@ struct RootView: View {
         #endif
         .onChange(of: hosts.hosts) { _, current in
             follow.hostsChanged(Set(current.map(\.id)))
-            push.hostsChanged(Set(current.map(\.id)))
             // Edited or deleted machines get a fresh session.
             for host in current where sessions.existing(host.id).map({ $0.host != host }) ?? false {
                 sessions.remove(host.id)
@@ -118,6 +117,9 @@ struct RootView: View {
             for id in sessions.ids where !current.contains(where: { $0.id == id }) {
                 sessions.remove(id)
             }
+            // After the removals: a removed machine's token file goes with its session, while
+            // the machine is still known to have one.
+            push.hostsChanged(Set(current.map(\.id)))
         }
         .onChange(of: hosts.passwordRevisions) { old, new in
             // A new password: start over with it (Host doesn't hold it, so the check above misses it).
