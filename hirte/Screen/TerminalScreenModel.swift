@@ -500,7 +500,7 @@ final class TerminalScreenModel {
         // two transfers would type two paths, and one's failure could replace the other's banner.
         if case .sending = attachment { return nil }
         guard !data.isEmpty else { attachment = .failed("The file is empty."); return nil }
-        guard data.count <= Attachment.sizeLimit else {
+        guard data.count <= hirte.Attachment.sizeLimit else {
             attachment = .failed(AttachmentError.tooLarge.localizedDescription)
             return nil
         }
@@ -512,7 +512,10 @@ final class TerminalScreenModel {
         }
         let name = RemoteUpload.fileName(stem: stem, extension: ext)
         attachment = .sending(name: name, fraction: 0)
-        let task = Task { [weak self] in await self?.send(data, named: name, through: session) }
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.send(data, named: name, through: session)
+        }
         upload = task
         return task
     }

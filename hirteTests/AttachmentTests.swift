@@ -47,8 +47,11 @@ struct AttachmentTests {
         #expect(abs(fitted.size.height - 2048) <= 1)
     }
 
+    /// A file with exactly this name, in a folder of its own (the stem is part of what's checked).
     private func temporaryFile(_ name: String, _ data: Data) throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hirte-attachment-\(UUID().uuidString)-\(name)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("hirte-attachment-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(name)
         try data.write(to: url)
         return url
     }
