@@ -39,11 +39,15 @@ struct Attachment {
         return Attachment(data: jpeg, stem: stem, ext: "jpg")
     }
 
+    /// Representations whose bytes go out as they are (an animation stays one), before the
+    /// `UIImage` fallback flattens whatever else is there into a PNG.
+    static let imageTypes: [UTType] = [.png, .jpeg, .gif, .webP]
+
     /// The image on the pasteboard, if there is one. Reading it is what the person asked for.
     static func pasteboardImage() -> Attachment? {
         let pasteboard = UIPasteboard.general
         guard pasteboard.hasImages else { return nil }
-        for type in [UTType.png, .jpeg] {
+        for type in imageTypes {
             if let data = pasteboard.data(forPasteboardType: type.identifier), let image = image(data, stem: "pasted") { return image }
         }
         guard let png = pasteboard.image?.pngData() else { return nil }
@@ -73,9 +77,11 @@ struct Attachment {
         for provider in providers where provider.canLoadObject(ofClass: NSString.self) {
             if let text = try? await provider.loadObject(ofClass: NSString.self) { return .text(text as String) }
         }
-        for provider in providers where provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
-            if let data = try? await provider.loadDataRepresentation(for: .image), let image = image(data, stem: "pasted") {
-                return .image(image)
+        for provider in providers {
+            for type in imageTypes + [.image] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+                if let data = try? await provider.loadDataRepresentation(for: type), let image = image(data, stem: "pasted") {
+                    return .image(image)
+                }
             }
         }
         return nil

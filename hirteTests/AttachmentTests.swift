@@ -2,6 +2,7 @@ import Foundation
 import HerdrKit
 import Testing
 import UIKit
+import UniformTypeIdentifiers
 @testable import hirte
 
 @MainActor
@@ -61,6 +62,19 @@ struct AttachmentTests {
         let text = try Attachment.file(try temporaryFile("notes.md", Data("# notes\n".utf8)))
         #expect(text.ext == "md")
         #expect(text.data == Data("# notes\n".utf8))
+    }
+
+    /// A GIF on the pasteboard keeps its bytes (and its frames); only unknown formats are flattened.
+    @Test func pasteboardGIFKeepsItsBytes() throws {
+        let gif = Data([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+                        0xFF, 0xFF, 0xFF, 0x21, 0xF9, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2C, 0x00, 0x00, 0x00, 0x00,
+                        0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3B])
+        UIPasteboard.general.setData(gif, forPasteboardType: UTType.gif.identifier)
+        defer { UIPasteboard.general.string = "" }
+        #expect(UIPasteboard.general.hasImages)
+        let pasted = try #require(Attachment.pasteboardImage())
+        #expect(pasted.ext == "gif")
+        #expect(pasted.data == gif)
     }
 
     @Test func undecodableBytesAreNoImage() {
